@@ -1,0 +1,7 @@
+type=alexnet, quant_method=linear, param_bits=8, bn_bits=32, fwd_bits=8, overflow_rate=0.0, acc1=0.0000, acc5=0.0000
+type=alexnet, quant_method=linear, param_bits=8, bn_bits=32, fwd_bits=8, overflow_rate=0.0, acc1=0.0000, acc5=0.0000
+type=alexnet, quant_method=linear, param_bits=8, bn_bits=8, fwd_bits=8, overflow_rate=0.0, acc1=0.0000, acc5=0.0000
+type=mnist, quant_method=linear, param_bits=8, bn_bits=8, fwd_bits=8, overflow_rate=0.0, acc1=0.0000, acc5=0.0000
+type=mnist, quant_method=linear, param_bits=8, bn_bits=8, fwd_bits=8, overflow_rate=0.0, acc1=0.0000, acc5=0.0000
+type=mnist, quant_method=linear, param_bits=8, bn_bits=8, fwd_bits=8, overflow_rate=0.0, acc1=0.0000, acc5=0.0000
+type=mnist, quant_method=linear, param_bits=8, bn_bits=8, fwd_bits=8, overflow_rate=0.0, acc1=0.9844, acc5=0.9996
