@@ -42,6 +42,96 @@ def k_means_cpu(weight, n_clusters, init='linear', max_iter=50):
     labels = labels.reshape(org_shape)
     return torch.from_numpy(centroids).cuda().view(1, -1), torch.from_numpy(labels).int().cuda()
 
+def weight_k_means_cpu(weight, importance, n_clusters, init='linear', max_iter=50, ha=0.0, entropy_reg=0.0, diameter_reg=0.0):
+    # flatten the weight for computing k-means
+    org_shape = weight.shape
+    weight = weight.reshape(-1, 1)  # single feature
+    importance = importance.reshape(-1,1)
+    is_quartic = True if ha > 0.0 else False
+    is_entropy_reg = True if entropy_reg > 0.0 else False
+    is_diameter_reg = True if diameter_reg > 0.0 else False
+
+    if init == 'linear':  # using the linear initial centroids
+        linspace = np.linspace(weight.min(), weight.max(), n_clusters + 1)
+        centroids = [(linspace[i] + linspace[i + 1]) / 2. for i in range(n_clusters)]
+        centroids = np.array(init_centroids).reshape(-1, 1)  # single feature
+    elif init == 'quantile':
+        centroids = [np.quantile(weight, 0.5*(2*i+1)/n_clusters) for i in range(n_clusters)]
+        centroids = np.array(init_centroids).reshape(-1, 1)  # single feature
+    else:
+        raise NotImplementedError
+
+    #precomputed features
+    weight_0 = np.ones_like(weight)
+    importance_weight = np.multiply(importance, weight)
+    weight_2 = np.multiply(weight, weight)
+    weight_3 = np.multiply(weight_2, weight)
+    theta = np.log(1./n_clusters)*np.ones(n_clusters)
+    labels = np.zeros(n_clusters, dtype='int')
+
+    for iters in range(max_iter):
+        labels = np.zeros(n_clusters, dtype='int')
+        coeffs = np.zeors((n_clusters, 4))
+
+        #compute labels
+        for j in range(n_clusters-1):
+            criteria = 2*(centroids[j+1]-centroids[j])*importance_weight - (centroids[j+1]**2 - centroids[j]**2)*importance
+            thr = 0
+            if is_entropy_reg:
+                thr += entropy_reg*(theta[j+1]-theta[j])
+            if is_quartic:
+                criteria += 4*ha*(centroids[j+1]-centroids[j])*weight_3 - 6*ha*(centroids[j+1]**2-centroids[j]**2)*weight_2 + 4*ha*(centroids[j+1]**3-centroids[j]**3)*weight
+                thr +=ha*(centroids[j+1]**4-centroids[j])
+            leq_j = np.ma.make_mask(criteria < thr)
+
+            labels += 1-leq_j
+
+            coeffs[j,0] -= 2*np.inner(importance_weight, leq_j)
+            coeffs[j,1] += 2*np.inner(importance, leq_j)
+            if is_quartic:
+                coeffs[j,0] -= 4*ha*np.inner(weight_3, leq_j)
+                coeffs[j,1] += 12*ha*np.inner(weight_2, leq_j)
+                coeffs[j,2] -= 12*ha*np.inner(weight, leq_j)
+                coeffs[j,3] += 4*ha*np.inner(weight_0, leq_j)
+
+        #compute coefficients
+        coeffs[-1,0] -= 2*np.inner(importance_weight, weight_0)
+        coeffs[-1,1] += 2*np.inner(importance, weight_0)
+        if is_quartic:
+            coeffs[-1,0] -= 4*ha*np.inner(weight_3, weight_0)
+            coeffs[-1,1] += 12*ha*np.inner(weight_2, weight_0)
+            coeffs[-1,2] -= 12*ha*np.inner(weight, weight_0)
+            coeffs[-1,3] += 4*ha*np.inner(weight_0, weight_0)
+
+        for j in range(n_clusters-1):
+            for p in range(4):
+                coeffs[n_clusters-1-j,p] = coeffs[n_clusters-1-j,p] - coeffs[n_clusters-2-j,p]
+        
+        #compute new cluster centers
+        for j in range(n_clusters):
+            if is_quartic and coeffs[j,3] > 0.0:
+                centroids[j] = np.roots([coeffs[j,3], coeffs[j,2], coeffs[j,1], coeffs[j,0]])[0]
+            elif coeffs[j,1] > 0.0:
+                centroids[j] = -coeffs[j,0]/coeffs[j,1]
+
+        #update leftmost and rightmost centroids for diameter_reg
+        if is_diameter_reg:
+            centroids[0] += 0.5*diameter_reg/coeffs[0,1]
+            if centroids[0] > centroids[1]:
+                centoids[0] = centroids[1]-1e-8
+            centroids[-1] -= 0.5*diameter_reg/coeffs[-1,1]
+            if centroids[-1] < centroids[-2]:
+                centroids[-1] = centroids[-2]+1e-8
+
+        #compute new thetas for entropy_reg
+        if is_entropy_reg:
+            probs = np.bincount(labels)
+            for j in range(n_clusters):
+                theta[j] = np.log(weight.size+n_clusters) - np.log(probs[j]+1)
+
+
+    labels = labels.reshape(org_shape)
+    return torch.from_numpy(centroids).cuda().view(1, -1), torch.from_numpy(labels).int().cuda()
 
 def k_means_torch(weight, n_clusters, init='linear', max_iter=50):
     org_shape = weight.size()
@@ -200,11 +290,10 @@ def fast_reconstruct_weight_from_k_means_result(centroids, ind_mats):
     return sum([c * ind_mat for c, ind_mat in zip(centroids_list, ind_mats)])
 
 
-def quantize_model(model, quantize_index, quantize_clusters, max_iter=50, mode='gpu', quantize_bias=False, centroids_init='linear', is_pruned=False, is_variational=False, importances=None, variational_lambda=0.0):
+def quantize_model(model, importances, quantize_index, quantize_clusters, max_iter=50, mode='cpu', quantize_bias=False, centroids_init='quantile', is_pruned=False, ha=0.0, entropy_reg=0.0, diameter_reg=0.0):
     assert len(quantize_index) == len(quantize_clusters), \
         'You should provide the same number of bit setting as layer list!'
-    if is_variational:
-        assert importances is not None, 'Please provide weight importances'
+    assert importances is not None, 'Please provide weight importances'
     quantize_layer_cluster_dict = {n: b for n, b in zip(quantize_index, quantize_clusters)}
     centroid_label_dict = {}
 
@@ -222,31 +311,29 @@ def quantize_model(model, quantize_index, quantize_clusters, max_iter=50, mode='
             assert hasattr(layer, 'bias')
         else:
             n_cluster = [n_cluster, n_cluster]  # using same setting for W and b
+
         # quantize weight
         if hasattr(layer, 'weight'):
             w = layer.weight.data
-            if is_variational: 
-                importance = importances[i]
-                nonzero_rate = importance.nonzero().size(0) * 100.0 / importance.numel()
+            importance = importances[i]
+            nonzero_rate = importance.nonzero().size(0) * 100.0 / importance.numel()
             if is_pruned:
                 nz_mask = w.ne(0)
                 print('*** pruned density: {:.4f}'.format(torch.sum(nz_mask) * 1.0/ w.numel()))
                 ori_shape = w.size()
                 w = w[nz_mask]
-                if is_variational:
-                    importance = importance[nz_mask]
+                importance = importance[nz_mask]
+
             if mode == 'cpu':
-                centroids, labels = k_means_cpu(w.cpu().numpy(), n_cluster[0], init=centroids_init, max_iter=max_iter)
+                #centroids, labels = k_means_cpu(w.cpu().numpy(), n_cluster[0], init=centroids_init, max_iter=max_iter)
+                centroids, labels = weighted_k_means_cpu(w.cpu().numpy(), importance.cpu().numpy(), n_cluster[0], init=centroids_init, max_iter=max_iter, ha=ha, entropy_reg=entropy_reg, diameter_rag=diameter_reg)
             elif mode == 'gpu':
                 centroids, labels = k_means_torch(w, n_cluster[0], init=centroids_init, max_iter=max_iter)
+                #TODO gpu algorithm for weighted k means
             elif mode == 'compact':
                 centroids, labels = k_means_torch_compact(w, n_cluster[0], init=centroids_init, use_gpu=True)
-            if is_variational:
-                if nonzero_rate > 101.:
-                    print(np.bincount(labels.cpu().numpy().flatten()))
-                    new_labels = variational_update(centroids, labels, importance, w, variational_lambda)
-                    labels = new_labels
-                    print(np.bincount(labels.cpu().numpy().flatten()))
+                #TODO compact algorithm for weighed k means
+
             if is_pruned:
                 full_labels = labels.new(ori_shape).zero_() - 1  # use -1 for pruned elements
                 full_labels[nz_mask] = labels
@@ -255,46 +342,42 @@ def quantize_model(model, quantize_index, quantize_clusters, max_iter=50, mode='
             this_cl_list.append([centroids, labels])
             w_q = reconstruct_weight_from_k_means_result(centroids, labels)
             
-            print("layer {} weight, L_2 loss {:.6f}".format(i,torch.mul(w_q - w, w_q - w).mean()))
-            if is_variational:
-                print("layer {} weight, weighted L_2 loss {:.6f}".format(i,torch.mul(importance, torch.mul(w_q - w, w_q - w)).mean()))
+            #print("layer {} weight, L_2 loss {:.6f}".format(i,torch.mul(w_q - w, w_q - w).mean()))
             del layer.weight
             # layer.weight = nn.Parameter(torch.from_numpy(w_q).float().cuda())
             layer.weight = nn.Parameter(w_q.float())
             del w_q
+
         # quantize bias
         if hasattr(layer, 'bias') and quantize_bias:
             w = layer.bias.data
-            if is_variational:
-                importance = importances[i]
-            if mode == 'cpu':
-                centroids, labels = k_means_cpu(w.cpu().numpy(), n_cluster[1], init=centroids_init, max_iter=max_iter)
-            else:
-                centroids, labels = k_means_torch(w, n_cluster[1], init=centroids_init, max_iter=max_iter)
+            importance = importances[i]
 
-            if is_variational:
-                if nonzero_rate > 101.:
-                    new_labels = variational_update(centroids, labels, importance, w, variational_lambda)
-                    labels = new_labels
+            if mode == 'cpu':
+                #centroids, labels = k_means_cpu(w.cpu().numpy(), n_cluster[0], init=centroids_init, max_iter=max_iter)
+                centroids, labels = weighted_k_means_cpu(w.cpu().numpy(), importance.cpu().numpy(), n_cluster[1], init=centroids_init, max_iter=max_iter, ha=ha, entropy_reg=entropy_reg, diameter_reg=diameter_gre)
+            elif mode == 'gpu':
+                centroids, labels = k_means_torch(w, n_cluster[1], init=centroids_init, max_iter=max_iter)
+                #TODO gpu algorithm for different weighted k means
+            elif mode == 'compact':
+                centroids, labels = k_means_torch_compact(w, n_cluster[1], init=centroids_init, use_gpu=True)
+                #TODO compact algorithm for different weighted k means
 
             this_cl_list.append([centroids, labels])
             w_q = reconstruct_weight_from_k_means_result(centroids, labels)
 
             
-            print("layer {} bias, L_2 loss {:.6f}".format(i,torch.mul(w_q - w, w_q - w).mean()))
-            if is_variational:
-                print("layer {} bias, weighted L_2 loss {:.6f}".format(i,torch.mul(importance, torch.mul(w_q - w, w_q - w)).mean()))
+            #print("layer {} bias, L_2 loss {:.6f}".format(i,torch.mul(w_q - w, w_q - w).mean()))
             del layer.bias
             # layer.bias = nn.Parameter(torch.from_numpy(w_q).float().cuda())
             layer.bias = nn.Parameter(w_q.float())
 
         centroid_label_dict[i] = this_cl_list
-        if is_variational:
-            print("Finished quantize layer %d (%d params) with time %.4f, lambda=%.2e"%(i, np.size(w.cpu().numpy()), time.time()-start_time,variational_lambda))
-        else:
-            print("Finished quantize layer %d (%d params) with time %.4f"%(i, np.size(w.cpu().numpy()), time.time()-start_time))
+        print("Finished quantize layer %d (%d params) with time %.4f"%(i, np.size(w.cpu().numpy()), time.time()-start_time))
     return centroid_label_dict
 
+#Deprecated
+'''
 def variational_update(centroids_, labels_, importance_, w_, lamb=1e-7):
     centroids, labels, importance, w = centroids_.cpu().numpy(), labels_.cpu().numpy(), importance_.cpu().numpy(), w_.cpu().numpy()
     m, k = np.size(w), np.size(centroids)
@@ -332,6 +415,7 @@ def variational_update(centroids_, labels_, importance_, w_, lamb=1e-7):
 
     new_labels = new_labels.reshape(w_shape)
     return torch.from_numpy(new_labels).int().cuda()
+'''
 
 def prune_weight_incremental(weight, mask, delta, qvalue_list):
     ori_shape = weight.shape

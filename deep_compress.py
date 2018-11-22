@@ -121,11 +121,11 @@ def quantize(model, weight_importance, valid_ind, n_clusters, is_imagenet):
             quantize_layer_size.append([np.prod(layer.weight.size())])
 
     if not is_entropy_reg and not is_diameter_reg:
-        centroid_label_dict = quantize_model(model, weight_importance, valid_ind, n_clusters, max_iter=args.max_iter, mode='cpu', is_pruned=is_pruned)
+        centroid_label_dict = quantize_model(model, weight_importance, valid_ind, n_clusters, max_iter=args.max_iter, mode='cpu', is_pruned=is_pruned, ha=args.hessian_average)
     elif is_entropy_reg:
-        centroid_label_dict = quantize_model(model, weight_importance, valid_ind, n_clusters, max_iter=args.max_iter, mode='cpu', is_pruned=is_pruned, is_entropy_reg=True, entropy_reg = args.entropy_reg)
+        centroid_label_dict = quantize_model(model, weight_importance, valid_ind, n_clusters, max_iter=args.max_iter, mode='cpu', is_pruned=is_pruned, ha=args.hessian_average, entropy_reg = args.entropy_reg)
     elif is_diameter_reg:
-        centroid_label_dict = quantize_model(model, weight_importance, valid_ind, n_clusters, max_iter=args.max_iter, mode='cpu', is_pruned=is_pruned, is_diameter_reg=True, entropy_reg = args.diameter_reg)
+        centroid_label_dict = quantize_model(model, weight_importance, valid_ind, n_clusters, max_iter=args.max_iter, mode='cpu', is_pruned=is_pruned, ha=args.hessian_average, diameter_reg = args.diameter_reg)
     else:
         raise NotImplementedError
 
@@ -134,23 +134,23 @@ def quantize(model, weight_importance, valid_ind, n_clusters, is_imagenet):
     org_size = get_original_weight_size(quantize_layer_size)
     return huffman_size * 1.0 / org_size
 
-def get_importance(model, ds_for_importance, valid_ind, is_imagenet, importance_type):
+def get_importance(model, ds_for_importance, valid_ind, is_imagenet, importance_type, ha=0.0):
     if importance_type == 'normal':
-        return get_all_one_importance(model, valid_ind, is_imagenet)
+        return get_all_one_importance(model, valid_ind, is_imagenet, ha=ha)
     elif importance_type == 'gradient':
-        return get_gradient_importance(model, ds_for_importance, valid_ind, is_imagenet)
+        return get_gradient_importance(model, ds_for_importance, valid_ind, is_imagenet, ha=ha)
     elif importance_type == 'hessian':
-        return get_hessian_importance(model, ds_for_importance, valid_ind, is_imagenet)
+        return get_hessian_importance(model, ds_for_importance, valid_ind, is_imagenet, ha=ha)
 
-def get_all_one_importance(model, valid_ind, is_imagenet):
+def get_all_one_importance(model, valid_ind, is_imagenet, ha=0.0):
     m_list = list(model.modules())
     importances = {}
     for ix in valid_ind:
         m = m_list[ix]
-        importances[ix] = torch.ones_like(m.weight)
+        importances[ix] = torch.ones_like(m.weight) + ha*m.weight.data**2
     return importances
 
-def get_gradient_importance(model, ds_for_importance, valid_ind, is_imagenet):
+def get_gradient_importance(model, ds_for_importance, valid_ind, is_imagenet, ha=0.0):
     criterion = nn.CrossEntropyLoss()
     m_list = list(model.modules())
     importances = {}
@@ -176,14 +176,14 @@ def get_gradient_importance(model, ds_for_importance, valid_ind, is_imagenet):
 
         for ix in valid_ind:
             m = m_list[ix]
-            importances[ix] += m.weight.grad.data**2+0.5*args.hessian_average*m.weight.data**2
+            importances[ix] += m.weight.grad.data**2 + ha*m.weight.data**2
             
     for ix in valid_ind:
         importances[ix] = importances[ix] / importances[ix].mean()
         
     return importances
 
-def get_hessian_importance(model, ds_for_importance, valid_ind, is_imagenet):
+def get_hessian_importance(model, ds_for_importance, valid_ind, is_imagenet, ha=0.0):
     criterion = nn.CrossEntropyLoss()
     m_list = list(model.modules())
     importances = {}
@@ -210,7 +210,7 @@ def get_hessian_importance(model, ds_for_importance, valid_ind, is_imagenet):
         
         for ix in valid_ind:
             m = m_list[ix]
-            importances[ix] += dhs 
+            importances[ix] += dhs[ix] + ha*m.weight.data**2
             
     for ix in valid_ind:
         importances[ix] = importances[ix] / importances[ix].mean()
@@ -293,7 +293,7 @@ def adjust_learning_rate(optimizer, epoch):
         param_group['lr'] = lr
 
 def retrain(model, train_ds, val_ds, valid_ind, mask_list, is_imagenet, is_retrain = False):
-    if is_reinit:
+    if is_retrain:
         for i, m in enumerate(model.modules()):
             if i in valid_ind:
                 torch.nn.init.xavier_normal_(m.weight)
@@ -371,15 +371,15 @@ def main():
 
             #get weight importance
             if args.prune_mode == 'normal':
-                weight_importance = get_importance(model_raw, train_ds, valid_ind, is_imagenet, importance_type='normal')
+                weight_importance = get_importance(model_raw, train_ds, valid_ind, is_imagenet, importance_type='normal', ha=args.hessian_average)
             elif args.prune_mode == 'hessian':
-                weight_importance = get_importance(model_raw, train_ds, valid_ind, is_imagenet, importance_type='hessian')
+                weight_importance = get_importance(model_raw, train_ds, valid_ind, is_imagenet, importance_type='hessian', ha=args.hessian_average)
             elif args.prune_mode == 'gradient':
                 gbs = 50
                 gbs = 1 if args.type == 'mnist'
                 gbs = 10 if 'cifar' in args.type
                 ds_for_gradient = ds_fetcher(gbs, data_root=args.data_root, val=False, input_size=args.input_size)
-                weight_importance = get_importance(model_raw, ds_for_gradient, valid_ind, is_imagenet, importance_type='gradient')
+                weight_importance = get_importance(model_raw, ds_for_gradient, valid_ind, is_imagenet, importance_type='gradient', ha=args.hessian_average)
 
             #prune
             mask_list, compression_ratio = prune(model_raw, weight_importance, valid_ind, ratios, is_imagenet)
