@@ -357,8 +357,8 @@ def get_density_list(model, prunable_idx):
 
 
 # fine-grained pruning
-def prune_fine_grained(model, prunable_idx, preserve_ratio_list, criteria='magnitude', importances=None):
-    if criteria=='wng':
+def prune_fine_grained(model, prunable_idx, preserve_ratio_list, criteria='normal', importances=None):
+    if criteria=='importance':
         assert importances is not None, 'Please provide weight importance'
     mask_list = []
     modules = list(model.modules())
@@ -372,9 +372,9 @@ def prune_fine_grained(model, prunable_idx, preserve_ratio_list, criteria='magni
         if n_preserve == 0:
             n_preserve = 1
 
-        if criteria == 'magnitude':
+        if criteria == 'normal':
             significance = m.weight.data ** 2
-        elif criteria == 'w_and_g':  # here we save the expectations in gradient
+        elif criteria == 'importance':  # here we save the expectations in gradient
             significance = importances[i] * m.weight.data**2  # m.weight.data ** 2 * m.weight.grad.data ** 2
         else:
             raise NotImplementedError
