@@ -23,7 +23,9 @@ import time
 
 parser = argparse.ArgumentParser(description='PyTorch SVHN Example')
 parser.add_argument('--type', default='cifar10', help='|'.join(selector.known_models))
-parser.add_argument('--batch_size', type=int, default=100, help='input batch size for training (default: 64)')
+parser.add_argument('--batch_size', type=int, default=100, help='input batch size for training')
+parser.add_argument('--gradient_batch_size', type=int, default=10, help='batch size for computing gradient square')
+parser.add_argument('--hessian_subsample_rate', type=float, default=1.0, help='subsample rate for computing hessian')
 parser.add_argument('--gpu', default=None, help='index of gpus to use')
 parser.add_argument('--ngpu', type=int, default=2, help='number of gpus to use')
 parser.add_argument('--seed', type=int, default=117, help='random seed (default: 1)')
@@ -57,9 +59,10 @@ parser.add_argument('--quant_finetune', default=False, type=bool, help='finetune
 parser.add_argument('--quant_finetune_lr', default=1e-3, type=float, help='learning rate for after-quant finetune')
 parser.add_argument('--quant_finetune_epoch', default=12, type=int, help='num of epochs for after-quant finetune')
 #Retrain argument
-parser.add_argument('--retrain', default=True, type=bool, help='if use pretrained model')
+parser.add_argument('--retrain', default=False, type=bool, help='if use pretrained model')
 parser.add_argument('--retrain_lr', default=1e-2, type=float, help='learning rate for retrain')
-parser.add_argument('--retrain_epoch', default=50, type=int, help='num of epochs for retrain')
+parser.add_argument('--retrain_epoch', default=25, type=int, help='num of epochs for retrain')
+parser.add_argument('--eval_epoch', default=5, type=int, help='evaluate performance per how many epochs')
 parser.add_argument('--subsample_rate', default=1.0, type=float, help='subsample_rate for retrain')
 args = parser.parse_args()
 
@@ -93,9 +96,6 @@ def prune(model, weight_importance, valid_ind, ratios, is_imagenet):
         mask_list = prune_fine_grained(model, valid_ind, ratios, criteria='importance', importances=weight_importance)
     else:
         raise NotImplementedError
-
-    if prune_finetune:
-        #TODO: finetune after pruning
 
     # now get the overall compression rate
     full_size = 0.
@@ -191,7 +191,6 @@ def get_hessian_importance(model, ds_for_importance, valid_ind, is_imagenet, ha=
         importances[ix] = 0.
 
     for i, (input, target) in enumerate(tqdm.tqdm(ds_for_importance, total=len(ds_for_importance))):
-        optimizer.zero_grad()
         if is_imagenet:
             input = torch.from_numpy(input)
             target = torch.from_numpy(target)
@@ -208,9 +207,10 @@ def get_hessian_importance(model, ds_for_importance, valid_ind, is_imagenet, ha=
 
         dhs = diagonal_hessian_multi(loss, output, model.parameters()) 
         
-        for ix in valid_ind:
+        for ii in range(len(valid_ind)):
+            ix = valid_ind[ii]
             m = m_list[ix]
-            importances[ix] += dhs[ix] + ha*m.weight.data**2
+            importances[ix] += dhs[2*ii] + ha*m.weight.data**2
             
     for ix in valid_ind:
         importances[ix] = importances[ix] / importances[ix].mean()
@@ -305,14 +305,15 @@ def retrain(model, train_ds, val_ds, valid_ind, mask_list, is_imagenet, is_retra
     lrs = args.retrain_lr if is_retrain else args.prune_finetune_lr
 
     if 'inception' in args.type or args.optimizer == 'rmsprop':
-        optimizer = torch.optim.RMSprop(model_raw.parameters(), lrs, alpha=0.9, eps=1.0, momentum=0.9)
+        optimizer = torch.optim.RMSprop(model.parameters(), lrs, alpha=0.9, eps=1.0, momentum=0.9)
     else:
-        optimizer = torch.optim.SGD(model_raw.parameters(), lr=lrs, momentum=0.9, weight_decay=args.decay)
+        optimizer = torch.optim.SGD(model.parameters(), lr=lrs, momentum=0.9, weight_decay=args.decay)
 
     for epoch in range(epochs):
         #adjust_learning_rate(optimizer, epoch)
         train(train_ds, model, criterion, optimizer, epoch, valid_ind, mask_list, is_imagenet)
-        eval_and_print(model, train_ds, val_ds, is_imagenet, prefix_str="retraining epoch {}".format(epoch+1))
+        if (epoch+1)%args.eval_epoch == 0: 
+            eval_and_print(model, train_ds, val_ds, is_imagenet, prefix_str="retraining epoch {}".format(epoch+1))
 
         #if acc1 > best_acc:
         #    best_acc = acc1
@@ -322,8 +323,8 @@ def retrain(model, train_ds, val_ds, valid_ind, mask_list, is_imagenet, is_retra
 
 def eval_and_print(model, train_ds, val_ds, is_imagenet, prefix_str=""):
     acc1_train, acc5_train, loss_train = misc.eval_model(model, train_ds, ngpu=args.ngpu, is_imagenet=is_imagenet)
-    print(prefix_str+" model, type={}, training acc1={:.4f}, acc5={:.4f}, loss={:.6f}".format(args.type, acc1_train, acc5_train, loss_train))
     acc1_val, acc5_val, loss_val = misc.eval_model(model, val_ds, ngpu=args.ngpu, is_imagenet=is_imagenet)
+    print(prefix_str+" model, type={}, training acc1={:.4f}, acc5={:.4f}, loss={:.6f}".format(args.type, acc1_train, acc5_train, loss_train))
     print(prefix_str+" model, type={}, validation acc1={:.4f}, acc5={:.4f}, loss={:.6f}".format(args.type, acc1_val, acc5_val, loss_val))
 
 def main():
@@ -340,8 +341,8 @@ def main():
             layer_type_list.append(type(layer))
 
     #get training dataset and validation dataset
-    if args.subsample_rate < 1.0 and args.type == mnist:
-        indices = np.random.choice(60000, int(args.subsample_rate*60000/batch_size)*batch_size, replace=True)
+    if args.subsample_rate < 1.0 and args.type == 'mnist':
+        indices = np.random.choice(60000, int(args.subsample_rate*60000/args.batch_size)*args.batch_size, replace=True)
         train_ds = ds_fetcher(args.batch_size, data_root=args.data_root, val=False, subsample=True, indices=indices, input_size=args.input_size)
     else:
         train_ds = ds_fetcher(args.batch_size, data_root=args.data_root, val=False, input_size=args.input_size)
@@ -375,10 +376,7 @@ def main():
             elif args.prune_mode == 'hessian':
                 weight_importance = get_importance(model_raw, train_ds, valid_ind, is_imagenet, importance_type='hessian', ha=args.hessian_average)
             elif args.prune_mode == 'gradient':
-                gbs = 50
-                gbs = 1 if args.type == 'mnist'
-                gbs = 10 if 'cifar' in args.type
-                ds_for_gradient = ds_fetcher(gbs, data_root=args.data_root, val=False, input_size=args.input_size)
+                ds_for_gradient = ds_fetcher(args.gradient_batch_size, data_root=args.data_root, val=False, input_size=args.input_size)
                 weight_importance = get_importance(model_raw, ds_for_gradient, valid_ind, is_imagenet, importance_type='gradient', ha=args.hessian_average)
 
             #prune
@@ -408,10 +406,7 @@ def main():
         elif args.quantization_mode == 'hessian':
             weight_importance = get_importance(model_raw, train_ds, valid_ind, is_imagenet, importance_type='hessian')
         elif args.quantization_mode == 'gradient':
-            gbs = 50
-            gbs = 1 if args.type == 'mnist'
-            gbs = 10 if 'cifar' in args.type
-            ds_for_gradient = ds_fetcher(gbs, data_root=args.data_root, val=False, input_size=args.input_size)
+            ds_for_gradient = ds_fetcher(args.gradient_batch_size, data_root=args.data_root, val=False, input_size=args.input_size)
             weight_importance = get_importance(model_raw, ds_for_gradient, valid_ind, is_imagenet, importance_type='gradient')
 
         #quantize

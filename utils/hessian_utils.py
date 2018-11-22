@@ -38,7 +38,7 @@ def diagonal_contraction(a, b, dims=2):
 
     m = torch.mul(a, b)
 
-    result = torch.sum(m, dim=range(a.dim())[:dims])
+    result = torch.sum(m, dim=list(range(a.dim()))[:dims])
     return result
 
 # FIXME: missing a term

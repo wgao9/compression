@@ -8,7 +8,7 @@ import numpy as np
 
 # from tensordot import tensordot_pytorch, contraction_pytorch
 
-from hessian_utils import *
+from utils.hessian_utils import *
 
 from itertools import product
 

@@ -26,7 +26,7 @@ def get(batch_size, data_root='/tmp/public_dataset/pytorch', train=True, val=Tru
                                    transforms.ToTensor(),
                                    transforms.Normalize((0.1307,), (0.3081,))
                                ])),
-                batch_size=batch_size, torch.utils.data.SubsetRandomSampler=indices, **kwargs)
+                batch_size=batch_size, sampler=torch.utils.data.SubsetRandomSampler(indices), **kwargs)
             ds.append(train_loader)
     if val:
         test_loader = torch.utils.data.DataLoader(
