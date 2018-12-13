@@ -42,7 +42,7 @@ def k_means_cpu(weight, n_clusters, init='linear', max_iter=50):
     labels = labels.reshape(org_shape)
     return torch.from_numpy(centroids).cuda().view(1, -1), torch.from_numpy(labels).int().cuda()
 
-def weighted_k_means_cpu(weight, importance, n_clusters, init='linear', max_iter=50, ha=0.0, entropy_reg=0.0, diameter_reg=0.0):
+def weighted_k_means_cpu(weight, importance, n_clusters, init='linear', max_iter=50, ha=0.0, entropy_reg=0.0, diameter_reg=0.0, diameter_entropy_reg=0.0):
     # flatten the weight for computing k-means
     org_shape = weight.shape
     n_weights = weight.size
@@ -51,6 +51,7 @@ def weighted_k_means_cpu(weight, importance, n_clusters, init='linear', max_iter
     is_quartic = True if ha > 0.0 else False
     is_entropy_reg = True if entropy_reg > 0.0 else False
     is_diameter_reg = True if diameter_reg > 0.0 else False
+    is_diameter_entropy_reg = True if diameter_entropy_reg > 0.0 else False
 
     if init == 'linear':  # using the linear initial centroids
         linspace = np.linspace(weight.min(), weight.max(), n_clusters + 1)
@@ -80,6 +81,8 @@ def weighted_k_means_cpu(weight, importance, n_clusters, init='linear', max_iter
             thr = 0
             if is_entropy_reg:
                 thr += entropy_reg*(theta[j+1]-theta[j])
+            elif is_diameter_entropy_reg:
+                thr += diameter_entropy_reg*(theta[j+1]-theta[j])*(centroids[-1]-centroids[0])**2 
             if is_quartic:
                 criteria += 4*ha*(centroids[j+1]-centroids[j])*weight_3 - 6*ha*(centroids[j+1]**2-centroids[j]**2)*weight_2 + 4*ha*(centroids[j+1]**3-centroids[j]**3)*weight
                 thr += ha*(centroids[j+1]**4-centroids[j]**4)
@@ -117,7 +120,15 @@ def weighted_k_means_cpu(weight, importance, n_clusters, init='linear', max_iter
             elif coeffs[j,1] > 0.0:
                 centroids[j] = -coeffs[j,0]/coeffs[j,1]
 
-        #update leftmost and rightmost centroids for diameter_reg
+        #compute new thetas for entropy_reg and diameter_entropy_reg
+        entropy = 0.0
+        if is_entropy_reg or is_diameter_entropy_reg:
+            probs = np.bincount(labels, minlength=n_clusters)
+            for j in range(n_clusters):
+                theta[j] = np.log(n_weights+n_clusters) - np.log(probs[j]+1)
+                entropy += (probs[j]+1)*theta[j]/(n_weights+n_clusters)
+
+        #update leftmost and rightmost centroids for diameter_reg or diameter_entropy_reg
         if is_diameter_reg:
             centroids[0] += 0.5*diameter_reg/coeffs[0,1]
             if centroids[0] > centroids[1]:
@@ -125,12 +136,18 @@ def weighted_k_means_cpu(weight, importance, n_clusters, init='linear', max_iter
             centroids[-1] -= 0.5*diameter_reg/coeffs[-1,1]
             if centroids[-1] < centroids[-2]:
                 centroids[-1] = centroids[-2]+1e-8
+        elif is_diameter_entropy_reg:
+            new_cen_0 = (-coeffs[0,0]+2*diameter_entropy_reg*entropy*centroids[-1])/(coeffs[0,1]+2*diameter_entropy_reg*entropy)
+            new_cen_minus_1 = (-coeffs[-1,0]+2*diameter_entropy_reg*entropy*centroids[0])/(coeffs[-1,1]+2*diameter_entropy_reg*entropy)
+            if new_cen_0 < centroids[1]:
+                centroids[0] = new_cen_0
+            else:
+                centroids[0] = centroids[1]-1e-8
+            if new_cen_minus_1 > centroids[-2]:
+                centroids[-1] = new_cen_minus_1
+            else:
+                centroids[-1] = centroids[-2]+1e-8
 
-        #compute new thetas for entropy_reg
-        if is_entropy_reg:
-            probs = np.bincount(labels, minlength=n_clusters)
-            for j in range(n_clusters):
-                theta[j] = np.log(n_weights+n_clusters) - np.log(probs[j]+1)
 
     labels = labels.reshape(org_shape)
     return torch.from_numpy(centroids).cuda().view(1, -1), torch.from_numpy(labels).int().cuda()

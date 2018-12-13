@@ -53,6 +53,7 @@ parser.add_argument('--bits', default=None, type=str, help='number of bits of qu
 parser.add_argument('--fix_bit', default=None, type=float, help='fix bit for every layer')
 parser.add_argument('--entropy_reg', default=0.0, type=float, help='entropy regularizer')
 parser.add_argument('--diameter_reg', default=0.0, type=float, help='diameter regularizer')
+parser.add_argument('--diameter_entropy_reg', default=0.0, type=float, help='diameter times entropyregularizer')
 parser.add_argument('--centroids_init', default='quantile', type=str, help='initialization method of centroids: linear/quantile')
 parser.add_argument('--max_iter', default=30, type=int, help='max iteration for quantization')
 parser.add_argument('--quant_finetune', default=False, type=bool, help='finetune after quantization or not')
@@ -114,6 +115,7 @@ def quantize(model, weight_importance, valid_ind, n_clusters, is_imagenet):
     is_pruned = False if args.prune_mode == 'none' else True
     is_entropy_reg = True if args.entropy_reg > 0.0 else False
     is_diameter_reg = True if args.diameter_reg > 0.0 else False
+    is_diameter_entropy_reg = True if args.diameter_entropy_reg > 0.0 else False
 
     quantize_layer_size = []
     for i, layer in enumerate(model.modules()):
@@ -126,6 +128,8 @@ def quantize(model, weight_importance, valid_ind, n_clusters, is_imagenet):
         centroid_label_dict = quantize_model(model, weight_importance, valid_ind, n_clusters, max_iter=args.max_iter, mode='cpu', is_pruned=is_pruned, ha=args.hessian_average, entropy_reg = args.entropy_reg)
     elif is_diameter_reg:
         centroid_label_dict = quantize_model(model, weight_importance, valid_ind, n_clusters, max_iter=args.max_iter, mode='cpu', is_pruned=is_pruned, ha=args.hessian_average, diameter_reg = args.diameter_reg)
+    elif is_diameter_entropy_reg:
+        centroid_label_dict = quantize_model(model, weight_importance, valid_ind, n_clusters, max_iter=args.max_iter, mode='cpu', is_pruned=is_pruned, ha=args.hessian_average, diameter_entropy_reg = args.diameter_entropy_reg)
     else:
         raise NotImplementedError
 
