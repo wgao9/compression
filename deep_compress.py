@@ -122,16 +122,14 @@ def quantize(model, weight_importance, valid_ind, n_clusters, is_imagenet):
         if i in valid_ind:
             quantize_layer_size.append([np.prod(layer.weight.size())])
 
-    if not is_entropy_reg and not is_diameter_reg:
-        centroid_label_dict = quantize_model(model, weight_importance, valid_ind, n_clusters, max_iter=args.max_iter, mode='cpu', is_pruned=is_pruned, ha=args.hessian_average)
-    elif is_entropy_reg:
+    if is_entropy_reg:
         centroid_label_dict = quantize_model(model, weight_importance, valid_ind, n_clusters, max_iter=args.max_iter, mode='cpu', is_pruned=is_pruned, ha=args.hessian_average, entropy_reg = args.entropy_reg)
     elif is_diameter_reg:
         centroid_label_dict = quantize_model(model, weight_importance, valid_ind, n_clusters, max_iter=args.max_iter, mode='cpu', is_pruned=is_pruned, ha=args.hessian_average, diameter_reg = args.diameter_reg)
     elif is_diameter_entropy_reg:
         centroid_label_dict = quantize_model(model, weight_importance, valid_ind, n_clusters, max_iter=args.max_iter, mode='cpu', is_pruned=is_pruned, ha=args.hessian_average, diameter_entropy_reg = args.diameter_entropy_reg)
     else:
-        raise NotImplementedError
+        centroid_label_dict = quantize_model(model, weight_importance, valid_ind, n_clusters, max_iter=args.max_iter, mode='cpu', is_pruned=is_pruned, ha=args.hessian_average)
 
     #Now get the overall compression rate
     huffman_size = get_huffmaned_weight_size(centroid_label_dict, quantize_layer_size, n_clusters)
@@ -209,12 +207,13 @@ def get_hessian_importance(model, ds_for_importance, valid_ind, is_imagenet, ha=
             output = model(input_var)
             loss = criterion(output / args.temperature, target_var)**2
 
-        dhs = diagonal_hessian_multi(loss, output, model.parameters()) 
-        
+       # dhs = diagonal_hessian_multi(loss, output, model.parameters()) 
+      
         for ii in range(len(valid_ind)):
             ix = valid_ind[ii]
             m = m_list[ix]
-            importances[ix] += dhs[2*ii] + ha*m.weight.data**2
+            dhs = diagonal_hessian_multi(loss, output, [m.weight])
+            importances[ix] += dhs[0] + ha*m.weight.data**2
             
     for ix in valid_ind:
         importances[ix] = importances[ix] / importances[ix].mean()
@@ -327,7 +326,7 @@ def eval_and_print(model, train_ds, val_ds, is_imagenet, prefix_str=""):
     print(prefix_str+" model, type={}, validation acc1={:.4f}, acc5={:.4f}, loss={:.6f}".format(args.type, acc1_val, acc5_val, loss_val))
     return acc1_train, acc5_train, loss_train, acc1_val, acc5_val, loss_val
 
-def pruning(model_raw, train_ds, val_ds, valid_ind, is_imagenet):
+def pruning(model_raw, train_ds, val_ds, ds_for_importance, valid_ind, is_imagenet):
     #stage by stage
     for stage in range(args.stage):
         #get pruning ratios
@@ -343,11 +342,9 @@ def pruning(model_raw, train_ds, val_ds, valid_ind, is_imagenet):
         if args.prune_mode == 'normal':
             weight_importance = get_importance(model_raw, train_ds, valid_ind, is_imagenet, importance_type='normal', ha=args.hessian_average)
         elif args.prune_mode == 'hessian':
-            ds_for_hessian = ds_fetcher(args.hessian_batch_size, data_root=args.data_root, val=False, input_size=args.input_size)
-            weight_importance = get_importance(model_raw, ds_for_hessian, valid_ind, is_imagenet, importance_type='hessian', ha=args.hessian_average)
+            weight_importance = get_importance(model_raw, ds_for_importance, valid_ind, is_imagenet, importance_type='hessian', ha=args.hessian_average)
         elif args.prune_mode == 'gradient':
-            ds_for_gradient = ds_fetcher(args.gradient_batch_size, data_root=args.data_root, val=False, input_size=args.input_size)
-            weight_importance = get_importance(model_raw, ds_for_gradient, valid_ind, is_imagenet, importance_type='gradient', ha=args.hessian_average)
+            weight_importance = get_importance(model_raw, ds_for_importance, valid_ind, is_imagenet, importance_type='gradient', ha=args.hessian_average)
 
         #prune
         mask_list, compression_ratio = prune(model_raw, weight_importance, valid_ind, ratios, is_imagenet)
@@ -361,7 +358,7 @@ def pruning(model_raw, train_ds, val_ds, valid_ind, is_imagenet):
 
         return compression_ratio, acc1_train, acc5_train, loss_train, acc1_val, acc5_val, loss_val
 
-def quantization(model_raw, train_ds, val_ds, valid_ind, is_imagenet):
+def quantization(model_raw, train_ds, val_ds, ds_for_importance, valid_ind, is_imagenet):
     # get quantize ratios
     if args.bits is not None:
         clusters = [int(math.pow(2,r)) for r in eval(args.bits)]  # the actual ratio
@@ -375,11 +372,9 @@ def quantization(model_raw, train_ds, val_ds, valid_ind, is_imagenet):
     if args.quantization_mode == 'normal':
         weight_importance = get_importance(model_raw, train_ds, valid_ind, is_imagenet, importance_type='normal')
     elif args.quantization_mode == 'hessian':
-        ds_for_hessian = ds_fetcher(args.hessian_batch_size, data_root=args.data_root, val=False, input_size=args.input_size)
-        weight_importance = get_importance(model_raw, ds_for_hessian, valid_ind, is_imagenet, importance_type='hessian')
+        weight_importance = get_importance(model_raw, ds_for_importance, valid_ind, is_imagenet, importance_type='hessian')
     elif args.quantization_mode == 'gradient':
-        ds_for_gradient = ds_fetcher(args.gradient_batch_size, data_root=args.data_root, val=False, input_size=args.input_size)
-        weight_importance = get_importance(model_raw, ds_for_gradient, valid_ind, is_imagenet, importance_type='gradient')
+        weight_importance = get_importance(model_raw, ds_for_importance, valid_ind, is_imagenet, importance_type='gradient')
 
     #quantize
     compress_ratio = quantize(model_raw, weight_importance, valid_ind, clusters, is_imagenet)
@@ -428,28 +423,35 @@ def main():
             layer_type_list.append(type(layer))
 
     if args.retrain == False:
-        #get training dataset and validation dataset
+        #get training dataset and validation dataset and dataset for computing importance
         train_ds = ds_fetcher(args.batch_size, data_root=args.data_root, val=False, input_size=args.input_size)
         val_ds = ds_fetcher(args.batch_size, data_root=args.data_root, train=False, input_size=args.input_size)
     
+        if args.quantization_mode == 'hessian':
+            ds_for_importance = ds_fetcher(args.hessian_batch_size, data_root=args.data_root, val=False, input_size=args.input_size)
+        elif args.quantization_mode == 'gradient':
+            ds_for_importance = ds_fetcher(args.gradient_batch_size, data_root=args.data_root, val=False, input_size=args.input_size)
+        else:
+            ds_for_importance = ds_fetcher(args.batch_size, data_root=args.data_root, val=False, input_size=args.input_size)
+
         # eval raw model
         eval_and_print(model_raw, train_ds, val_ds, is_imagenet, prefix_str="Raw")
     
         #Pruning
         if args.prune_mode != 'none':
-            compress_ratio, acc1_train, acc5_train, loss_train, acc1_val, acc5_val, loss_val = pruning(model_raw, train_ds, val_ds, valid_ind, is_imagenet)
+            compress_ratio, acc1_train, acc5_train, loss_train, acc1_val, acc5_val, loss_val = pruning(model_raw, train_ds, val_ds, ds_for_importance, valid_ind, is_imagenet)
         #Quantization
         if args.quantization_mode != 'none':
-            compress_ratio, acc1_train, acc5_train, loss_train, acc1_val, acc5_val, loss_val = quantization(model_raw, train_ds, val_ds, valid_ind, is_imagenet)
+            compress_ratio, acc1_train, acc5_train, loss_train, acc1_val, acc5_val, loss_val = quantization(model_raw, train_ds, val_ds, ds_for_importance, valid_ind, is_imagenet)
     else:
-        metrics_before = np.zeros(6)
-        metrics_after = np.zeros(7)
+        metrics = np.zeros((13,args.number_of_models))
         for i in range(args.number_of_models):
             #save retrained model
             filename = "retrained_i="+str(i)+"_ssr="+str(int(args.subsample_rate*1000))+"_"+args.type+".pth.tar"
             pathname = args.save_root+args.type
             filepath = os.path.join(pathname, filename)
             with open(filepath, "rb") as f:
+                print("Loading model parameters from"+filepath)
                 checkpoint = torch.load(f)
                 model_raw.load_state_dict(checkpoint['model_state_dict'])
                 ds_indices = checkpoint['ds_indices']
@@ -458,25 +460,30 @@ def main():
             train_ds = ds_fetcher(args.batch_size, data_root=args.data_root, val=False, subsample=True, indices=ds_indices, input_size=args.input_size)
             val_ds = ds_fetcher(args.batch_size, data_root=args.data_root, train=False, input_size=args.input_size)
     
+            if args.quantization_mode == 'hessian':
+                ds_for_importance = ds_fetcher(args.hessian_batch_size, data_root=args.data_root, val=False, subsample=True, indices=ds_indices, input_size=args.input_size)
+            elif args.quantization_mode == 'gradient':
+                ds_for_importance = ds_fetcher(args.gradient_batch_size, data_root=args.data_root, val=False, subsample=True, indices=ds_indices, input_size=args.input_size)
+            else:
+                ds_for_importance = ds_fetcher(args.batch_size, data_root=args.data_root, val=False, subsample=True, indices=ds_indices, input_size=args.input_size)
+
             # eval raw model
-            acc1_train, acc5_train, loss_train, acc1_val, acc5_val, loss_val = eval_and_print(model_raw, train_ds, val_ds, is_imagenet, prefix_str="Retrained_number %d"%i)
-            metrics_before +=np.asarray([acc1_train, acc5_train, loss_train, acc1_val, acc5_val, loss_val])/args.number_of_models 
+            metrics[0,i], metrics[1,i], metrics[2,i], metrics[3,i], metrics[4,i], metrics[5,i] = eval_and_print(model_raw, train_ds, val_ds, is_imagenet, prefix_str="Retrained_number %d"%i)
 
             #Pruning
             if args.prune_mode != 'none':
-                compress_ratio, acc1_train, acc5_train, loss_train, acc1_val, acc5_val, loss_val = pruning(model_raw, train_ds, val_ds, valid_ind, is_imagenet)
+                compress_ratio, acc1_train, acc5_train, loss_train, acc1_val, acc5_val, loss_val = pruning(model_raw, train_ds, val_ds, ds_for_importance, valid_ind, is_imagenet)
             #Quantization
             if args.quantization_mode != 'none':
-                compress_ratio, acc1_train, acc5_train, loss_train, acc1_val, acc5_val, loss_val = quantization(model_raw, train_ds, val_ds, valid_ind, is_imagenet)
+                metrics[6,i], metrics[7,i], metrics[8,i], metrics[9,i], metrics[10,i], metrics[11,i], metrics[12,i] = quantization(model_raw, train_ds, val_ds, ds_for_importance, valid_ind, is_imagenet)
 
-            metrics_after += np.asarray([compress_ratio, acc1_train, acc5_train, loss_train, acc1_val, acc5_val, loss_val])/args.number_of_models 
 
         #print average performance
-        print("Before compression model, type={}, training acc1={:.4f}, acc5={:.4f}, loss={:.6f}".format(args.type, metrics_before[0], metrics_before[1], metrics_before[2]))
-        print("Before compression model, type={}, validation acc1={:.4f}, acc5={:.4f}, loss={:.6f}".format(args.type, metrics_before[3], metrics_before[4], metrics_before[5]))
-        print("Compression ratio = {:.4f}".format(metrics_after[0]))
-        print("After compression model, type={}, training acc1={:.4f}, acc5={:.4f}, loss={:.6f}".format(args.type, metrics_after[1], metrics_after[2], metrics_after[3]))
-        print("After compression model, type={}, validation acc1={:.4f}, acc5={:.4f}, loss={:.6f}".format(args.type, metrics_after[4], metrics_after[5], metrics_after[6]))
+        print("Before compression model, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}".format(args.type, np.mean(metrics[0]), np.std(metrics[0]), np.mean(metrics[1]), np.std(metrics[1]), np.mean(metrics[2]), np.std(metrics[2])))
+        print("Before compression model, type={}, validation acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}".format(args.type, np.mean(metrics[3]), np.std(metrics[3]), np.mean(metrics[4]), np.std(metrics[4]), np.mean(metrics[5]), np.std(metrics[5])))
+        print("Compression ratio = {:.4f}+-{:.4f}".format(np.mean(metrics[6]), np.std(metrics[6])))
+        print("Before compression model, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}".format(args.type, np.mean(metrics[7]), np.std(metrics[7]), np.mean(metrics[8]), np.std(metrics[8]), np.mean(metrics[9]), np.std(metrics[9])))
+        print("Before compression model, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}".format(args.type, np.mean(metrics[10]), np.std(metrics[10]), np.mean(metrics[11]), np.std(metrics[11]), np.mean(metrics[12]), np.std(metrics[12])))
 
 if __name__ == '__main__':
     main()

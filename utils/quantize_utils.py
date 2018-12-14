@@ -309,7 +309,7 @@ def fast_reconstruct_weight_from_k_means_result(centroids, ind_mats):
     return sum([c * ind_mat for c, ind_mat in zip(centroids_list, ind_mats)])
 
 
-def quantize_model(model, importances, quantize_index, quantize_clusters, max_iter=50, mode='cpu', quantize_bias=False, centroids_init='quantile', is_pruned=False, ha=0.0, entropy_reg=0.0, diameter_reg=0.0):
+def quantize_model(model, importances, quantize_index, quantize_clusters, max_iter=50, mode='cpu', quantize_bias=False, centroids_init='quantile', is_pruned=False, ha=0.0, entropy_reg=0.0, diameter_reg=0.0, diameter_entropy_reg=0.0):
     assert len(quantize_index) == len(quantize_clusters), \
         'You should provide the same number of bit setting as layer list!'
     assert importances is not None, 'Please provide weight importances'
@@ -345,7 +345,7 @@ def quantize_model(model, importances, quantize_index, quantize_clusters, max_it
 
             if mode == 'cpu':
                 #centroids, labels = k_means_cpu(w.cpu().numpy(), n_cluster[0], init=centroids_init, max_iter=max_iter)
-                centroids, labels = weighted_k_means_cpu(w.cpu().numpy(), importance.cpu().numpy(), n_cluster[0], init=centroids_init, max_iter=max_iter, ha=ha, entropy_reg=entropy_reg, diameter_reg=diameter_reg)
+                centroids, labels = weighted_k_means_cpu(w.cpu().numpy(), importance.cpu().numpy(), n_cluster[0], init=centroids_init, max_iter=max_iter, ha=ha, entropy_reg=entropy_reg, diameter_reg=diameter_reg, diameter_entropy_reg=diameter_entropy_reg)
             elif mode == 'gpu':
                 centroids, labels = k_means_torch(w, n_cluster[0], init=centroids_init, max_iter=max_iter)
                 #TODO gpu algorithm for weighted k means
@@ -374,7 +374,7 @@ def quantize_model(model, importances, quantize_index, quantize_clusters, max_it
 
             if mode == 'cpu':
                 #centroids, labels = k_means_cpu(w.cpu().numpy(), n_cluster[0], init=centroids_init, max_iter=max_iter)
-                centroids, labels = weighted_k_means_cpu(w.cpu().numpy(), importance.cpu().numpy(), n_cluster[1], init=centroids_init, max_iter=max_iter, ha=ha, entropy_reg=entropy_reg, diameter_reg=diameter_reg)
+                centroids, labels = weighted_k_means_cpu(w.cpu().numpy(), importance.cpu().numpy(), n_cluster[1], init=centroids_init, max_iter=max_iter, ha=ha, entropy_reg=entropy_reg, diameter_reg=diameter_reg, diameter_entropy_reg=diameter_entropy_reg)
             elif mode == 'gpu':
                 centroids, labels = k_means_torch(w, n_cluster[1], init=centroids_init, max_iter=max_iter)
                 #TODO gpu algorithm for different weighted k means

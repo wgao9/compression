@@ -33,9 +33,10 @@ parser.add_argument('--save_root', default='retrained_models/', help='folder for
 parser.add_argument('--decay', default=1e-4, type=float, help='weight decay')
 #Retrain argument
 parser.add_argument('--number_of_models', default=20, type=int, help='number of independent models to retrain')
+parser.add_argument('--starting_index', default=0, type=int, help='start index for naming models')
 parser.add_argument('--lr', default=1e-2, type=float, help='learning rate for retrain')
 parser.add_argument('--epoch', default=25, type=int, help='num of epochs for retrain')
-parser.add_argument('--eval_epoch', default=5, type=int, help='evaluate performance per how many epochs')
+parser.add_argument('--eval_epoch', default=25, type=int, help='evaluate performance per how many epochs')
 parser.add_argument('--subsample_rate', default=1.0, type=float, help='subsample_rate for retrain')
 args = parser.parse_args()
 
@@ -158,7 +159,7 @@ def main():
         acc1_train, acc5_train, loss_train, acc1_val, acc5_val, loss_val = eval_and_print(model_raw, train_ds, val_ds, is_imagenet, prefix_str="Retrained")
 
         #save retrained model
-        filename = "retrained_i="+str(i)+"_ssr="+str(int(args.subsample_rate*1000))+"_"+args.type+".pth.tar"
+        filename = "retrained_i="+str(i+args.starting_index)+"_ssr="+str(int(args.subsample_rate*1000))+"_"+args.type+".pth.tar"
         pathname = args.save_root+args.type
         filepath = os.path.join(pathname, filename)
         with open(filepath, "wb") as f:
