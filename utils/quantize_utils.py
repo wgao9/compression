@@ -132,7 +132,7 @@ def weighted_k_means_cpu(weight, importance, n_clusters, init='linear', max_iter
         if is_diameter_reg:
             centroids[0] += 0.5*diameter_reg/coeffs[0,1]
             if centroids[0] > centroids[1]:
-                centoids[0] = centroids[1]-1e-8
+                centroids[0] = centroids[1]-1e-8
             centroids[-1] -= 0.5*diameter_reg/coeffs[-1,1]
             if centroids[-1] < centroids[-2]:
                 centroids[-1] = centroids[-2]+1e-8

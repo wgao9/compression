@@ -482,8 +482,8 @@ def main():
         print("Before compression model, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}".format(args.type, np.mean(metrics[0]), np.std(metrics[0]), np.mean(metrics[1]), np.std(metrics[1]), np.mean(metrics[2]), np.std(metrics[2])))
         print("Before compression model, type={}, validation acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}".format(args.type, np.mean(metrics[3]), np.std(metrics[3]), np.mean(metrics[4]), np.std(metrics[4]), np.mean(metrics[5]), np.std(metrics[5])))
         print("Compression ratio = {:.4f}+-{:.4f}".format(np.mean(metrics[6]), np.std(metrics[6])))
-        print("Before compression model, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}".format(args.type, np.mean(metrics[7]), np.std(metrics[7]), np.mean(metrics[8]), np.std(metrics[8]), np.mean(metrics[9]), np.std(metrics[9])))
-        print("Before compression model, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}".format(args.type, np.mean(metrics[10]), np.std(metrics[10]), np.mean(metrics[11]), np.std(metrics[11]), np.mean(metrics[12]), np.std(metrics[12])))
+        print("After compression model, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}".format(args.type, np.mean(metrics[7]), np.std(metrics[7]), np.mean(metrics[8]), np.std(metrics[8]), np.mean(metrics[9]), np.std(metrics[9])))
+        print("After compression model, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}".format(args.type, np.mean(metrics[10]), np.std(metrics[10]), np.mean(metrics[11]), np.std(metrics[11]), np.mean(metrics[12]), np.std(metrics[12])))
 
 if __name__ == '__main__':
     main()
