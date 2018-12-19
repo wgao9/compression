@@ -42,12 +42,13 @@ def k_means_cpu(weight, n_clusters, init='linear', max_iter=50):
     labels = labels.reshape(org_shape)
     return torch.from_numpy(centroids).cuda().view(1, -1), torch.from_numpy(labels).int().cuda()
 
-def weighted_k_means_cpu(weight, importance, n_clusters, init='linear', max_iter=50, ha=0.0, entropy_reg=0.0, diameter_reg=0.0, diameter_entropy_reg=0.0):
+def weighted_k_means_cpu(weight, importance, hessian, n_clusters, init='linear', max_iter=50, ha=0.0, entropy_reg=0.0, diameter_reg=0.0, diameter_entropy_reg=0.0):
     # flatten the weight for computing k-means
     org_shape = weight.shape
     n_weights = weight.size
     weight = weight.reshape(-1)  # single feature
     importance = importance.reshape(-1)
+    hessian = hessian.reshape(-1)
     is_quartic = True if ha > 0.0 else False
     is_entropy_reg = True if entropy_reg > 0.0 else False
     is_diameter_reg = True if diameter_reg > 0.0 else False
@@ -64,10 +65,11 @@ def weighted_k_means_cpu(weight, importance, n_clusters, init='linear', max_iter
         raise NotImplementedError
 
     #precomputed features
-    weight_0 = np.ones_like(weight)
     importance_weight = np.multiply(importance, weight)
-    weight_2 = np.multiply(weight, weight)
-    weight_3 = np.multiply(weight_2, weight)
+    hessian_2 = np.multiply(hessian, hessian)
+    hessian_2_weight = np.multiply(hessian_2, weight)
+    hessian_2_weight_2 = np.multiply(hessian_2_weight, weight)
+    hessian_2_weight_3 = np.multiply(hessian_2_weight_2, weight)
     theta = np.log(1./n_clusters)*np.ones(n_clusters)
     labels = np.zeros(n_weights, dtype='int')
 
@@ -84,29 +86,29 @@ def weighted_k_means_cpu(weight, importance, n_clusters, init='linear', max_iter
             elif is_diameter_entropy_reg:
                 thr += diameter_entropy_reg*(theta[j+1]-theta[j])*(centroids[-1]-centroids[0])**2 
             if is_quartic:
-                criteria += 4*ha*(centroids[j+1]-centroids[j])*weight_3 - 6*ha*(centroids[j+1]**2-centroids[j]**2)*weight_2 + 4*ha*(centroids[j+1]**3-centroids[j]**3)*weight
-                thr += ha*(centroids[j+1]**4-centroids[j]**4)
+                criteria += ha*(4*(centroids[j+1]-centroids[j])*hessian_2_weight_3 - 6*(centroids[j+1]**2-centroids[j]**2)*hessian_2_weight_2 + 4*ha*(centroids[j+1]**3-centroids[j]**3)*hessian_2_weight - (centroids[j+1]**4-centroids[j]**4)*hessian_2)
 
             leq_j = (criteria < thr).astype(int)
 
             labels += 1-leq_j
 
+            #compute coefficients
             coeffs[j,0] -= 2*np.inner(importance_weight, leq_j)
             coeffs[j,1] += 2*np.inner(importance, leq_j)
             if is_quartic:
-                coeffs[j,0] -= 4*ha*np.inner(weight_3, leq_j)
-                coeffs[j,1] += 12*ha*np.inner(weight_2, leq_j)
-                coeffs[j,2] -= 12*ha*np.inner(weight, leq_j)
-                coeffs[j,3] += 4*ha*np.inner(weight_0, leq_j)
+                coeffs[j,0] -= 4*ha*np.inner(hessian_2_weight_3, leq_j)
+                coeffs[j,1] += 12*ha*np.inner(hessian_2_weight_2, leq_j)
+                coeffs[j,2] -= 12*ha*np.inner(hessian_2_weight, leq_j)
+                coeffs[j,3] += 4*ha*np.inner(hessian_2, leq_j)
 
-        #compute coefficients
-        coeffs[-1,0] -= 2*np.inner(importance_weight, weight_0)
-        coeffs[-1,1] += 2*np.inner(importance, weight_0)
+        leq_minus_1 = np.ones(n_weights, dtype='int')
+        coeffs[-1,0] -= 2*np.inner(importance_weight, leq_minus_1)
+        coeffs[-1,1] += 2*np.inner(importance, leq_minus_1)
         if is_quartic:
-            coeffs[-1,0] -= 4*ha*np.inner(weight_3, weight_0)
-            coeffs[-1,1] += 12*ha*np.inner(weight_2, weight_0)
-            coeffs[-1,2] -= 12*ha*np.inner(weight, weight_0)
-            coeffs[-1,3] += 4*ha*np.inner(weight_0, weight_0)
+            coeffs[-1,0] -= 4*ha*np.inner(hessian_2_weight_3, leq_minus_1)
+            coeffs[-1,1] += 12*ha*np.inner(hessian_2_weight_2, leq_minus_1)
+            coeffs[-1,2] -= 12*ha*np.inner(hessian_2_weight, leq_minus_1)
+            coeffs[-1,3] += 4*ha*np.inner(hessian_2, leq_minus_1)
 
         for j in range(n_clusters-1):
             for p in range(4):
@@ -308,11 +310,11 @@ def fast_reconstruct_weight_from_k_means_result(centroids, ind_mats):
     # return weight
     return sum([c * ind_mat for c, ind_mat in zip(centroids_list, ind_mats)])
 
-
-def quantize_model(model, importances, quantize_index, quantize_clusters, max_iter=50, mode='cpu', quantize_bias=False, centroids_init='quantile', is_pruned=False, ha=0.0, entropy_reg=0.0, diameter_reg=0.0, diameter_entropy_reg=0.0):
+def quantize_model(model, importances, hessians, quantize_index, quantize_clusters, max_iter=50, mode='cpu', quantize_bias=False, centroids_init='quantile', is_pruned=False, ha=0.0, entropy_reg=0.0, diameter_reg=0.0, diameter_entropy_reg=0.0):
     assert len(quantize_index) == len(quantize_clusters), \
         'You should provide the same number of bit setting as layer list!'
     assert importances is not None, 'Please provide weight importances'
+    assert hessian is not None, 'please provide hessians'
     quantize_layer_cluster_dict = {n: b for n, b in zip(quantize_index, quantize_clusters)}
     centroid_label_dict = {}
 
@@ -345,7 +347,7 @@ def quantize_model(model, importances, quantize_index, quantize_clusters, max_it
 
             if mode == 'cpu':
                 #centroids, labels = k_means_cpu(w.cpu().numpy(), n_cluster[0], init=centroids_init, max_iter=max_iter)
-                centroids, labels = weighted_k_means_cpu(w.cpu().numpy(), importance.cpu().numpy(), n_cluster[0], init=centroids_init, max_iter=max_iter, ha=ha, entropy_reg=entropy_reg, diameter_reg=diameter_reg, diameter_entropy_reg=diameter_entropy_reg)
+                centroids, labels = weighted_k_means_cpu(w.cpu().numpy(), importance.cpu().numpy(), hessian.cpu().numpy(), n_cluster[0], init=centroids_init, max_iter=max_iter, ha=ha, entropy_reg=entropy_reg, diameter_reg=diameter_reg, diameter_entropy_reg=diameter_entropy_reg)
             elif mode == 'gpu':
                 centroids, labels = k_means_torch(w, n_cluster[0], init=centroids_init, max_iter=max_iter)
                 #TODO gpu algorithm for weighted k means
@@ -374,7 +376,7 @@ def quantize_model(model, importances, quantize_index, quantize_clusters, max_it
 
             if mode == 'cpu':
                 #centroids, labels = k_means_cpu(w.cpu().numpy(), n_cluster[0], init=centroids_init, max_iter=max_iter)
-                centroids, labels = weighted_k_means_cpu(w.cpu().numpy(), importance.cpu().numpy(), n_cluster[1], init=centroids_init, max_iter=max_iter, ha=ha, entropy_reg=entropy_reg, diameter_reg=diameter_reg, diameter_entropy_reg=diameter_entropy_reg)
+                centroids, labels = weighted_k_means_cpu(w.cpu().numpy(), importance.cpu().numpy(), hessian.cpu().numpy(), n_cluster[1], init=centroids_init, max_iter=max_iter, ha=ha, entropy_reg=entropy_reg, diameter_reg=diameter_reg, diameter_entropy_reg=diameter_entropy_reg)
             elif mode == 'gpu':
                 centroids, labels = k_means_torch(w, n_cluster[1], init=centroids_init, max_iter=max_iter)
                 #TODO gpu algorithm for different weighted k means
