@@ -23,6 +23,8 @@ import time
 parser = argparse.ArgumentParser(description='Retrain model with fewer samples')
 parser.add_argument('--type', default='cifar10', help='|'.join(selector.known_models))
 parser.add_argument('--batch_size', type=int, default=100, help='input batch size for training')
+parser.add_argument('--gbs', type=int, default=10, help='input batch size for evaluating gradient')
+parser.add_argument('--hbs', type=int, default=10, help='input batch size for evaluating hessian')
 parser.add_argument('--gpu', default=None, help='index of gpus to use')
 parser.add_argument('--ngpu', type=int, default=2, help='number of gpus to use')
 parser.add_argument('--model_root', default='~/.torch/models/', help='folder to save the model')
@@ -268,7 +270,8 @@ def main():
 
         if args.compute_gradient:
             #compute importance and write to file
-            weight_importance = get_gradient_importance(model_raw, train_ds, valid_ind, is_imagenet)
+            ds_for_importance = ds_fetcher(args.gbs, data_root=args.data_root, val=False, subsample=True, indices=indices, input_size=args.input_size)
+            weight_importance = get_gradient_importance(model_raw, ds_for_importance, valid_ind, is_imagenet)
             filename = args.type+"_gradient_"+str(i+args.starting_index)
             if args.temperature > 1.0:
                 filename += "_t="+str(int(args.temperature))
@@ -279,8 +282,9 @@ def main():
 
         if args.compute_hessian:
             #compute importance and write to file
-            weight_importance = get_hessian_importance(model_raw, train_ds, valid_ind, is_imagenet)
-            filename = args.type+"_hessian"+str(i+args.starting_index)
+            ds_for_hessian = ds_fetcher(args.hbs, data_root=args.data_root, val=False, subsample=True, indices=indices, input_size=args.input_size)
+            weight_importance = get_hessian_importance(model_raw, ds_for_hessian, valid_ind, is_imagenet)
+            filename = args.type+"_hessian_"+str(i+args.starting_index)
             if args.temperature > 1.0:
                 filename += "_t="+str(int(args.temperature))
             filename += ".pth"

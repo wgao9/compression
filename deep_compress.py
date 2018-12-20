@@ -20,6 +20,11 @@ from utils.quantize_utils import *
 from utils.hessian_utils import *
 
 import time
+import sys
+import os
+module_path = os.path.abspath(os.getcwd())
+if module_path not in sys.path:
+    sys.path.append(module_path)
 
 parser = argparse.ArgumentParser(description='PyTorch SVHN Example')
 parser.add_argument('--type', default='cifar10', help='|'.join(selector.known_models))
@@ -50,7 +55,9 @@ parser.add_argument('--is_pruned', default=False, type=bool, help='Is pruned mod
 #Retrain argument
 parser.add_argument('--number_of_models', default=5, type=int, help='number of models to use')
 parser.add_argument('--subsample_rate', default=0.05, type=float, help='subsampling rate')
-parser.add_argument('--save_root', default='sub_models/', help='folder for retrained models')
+parser.add_argument('--save_root', default='sub_models/', type=str, help='folder for retrained models')
+parser.add_argument('--result_root', default=None, type=str, help='folder to store results')
+parser.add_argument('--result_name', default='', type=str, help='folder to store results')
 args = parser.parse_args()
 
 args.gpu = misc.auto_select_gpu(utility_bound=0, num_gpu=args.ngpu, selected_gpus=args.gpu)
@@ -281,6 +288,28 @@ def main():
     if args.quant_finetune:
         print("After finetune, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}".format(args.type, np.mean(metrics[13]), np.std(metrics[13]), np.mean(metrics[14]), np.std(metrics[14]), np.mean(metrics[15]), np.std(metrics[15])))
         print("After finetune, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}".format(args.type, np.mean(metrics[16]), np.std(metrics[16]), np.mean(metrics[17]), np.std(metrics[17]), np.mean(metrics[18]), np.std(metrics[18])))
+
+    if args.result_root != None:
+        filename = args.type+"_"+args.mode+"_"+args.result_name
+        pathname = args.result_root
+        if not os.path.exists(pathname):
+            os.makedirs(pathname)
+        filepath = os.path.join(pathname, filename)
+
+        with open(filepath, "w") as f:
+            for arg in sys.argv:
+                f.write(arg+" ")
+            f.write("\n")
+            f.write("\n")
+            f.write("Before quantization, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f} \n".format(args.type, np.mean(metrics[1]), np.std(metrics[1]), np.mean(metrics[2]), np.std(metrics[2]), np.mean(metrics[3]), np.std(metrics[3])))
+            f.write("Before quantization, type={}, validation acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f} \n".format(args.type, np.mean(metrics[4]), np.std(metrics[4]), np.mean(metrics[5]), np.std(metrics[5]), np.mean(metrics[6]), np.std(metrics[6])))
+            f.write("Compression ratio = {:.4f}+-{:.4f} \n".format(np.mean(metrics[0]), np.std(metrics[0])))
+            f.write("After quantization, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f} \n".format(args.type, np.mean(metrics[7]), np.std(metrics[7]), np.mean(metrics[8]), np.std(metrics[8]), np.mean(metrics[9]), np.std(metrics[9])))
+            f.write("After quantization, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f} \n".format(args.type, np.mean(metrics[10]), np.std(metrics[10]), np.mean(metrics[11]), np.std(metrics[11]), np.mean(metrics[12]), np.std(metrics[12])))
+            if args.quant_finetune:
+                f.write("After finetune, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f} \n".format(args.type, np.mean(metrics[13]), np.std(metrics[13]), np.mean(metrics[14]), np.std(metrics[14]), np.mean(metrics[15]), np.std(metrics[15])))
+                f.write("After finetune, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f} \n".format(args.type, np.mean(metrics[16]), np.std(metrics[16]), np.mean(metrics[17]), np.std(metrics[17]), np.mean(metrics[18]), np.std(metrics[18])))
+            
 
 if __name__ == '__main__':
     main()
