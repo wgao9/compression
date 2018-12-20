@@ -24,12 +24,12 @@ import time
 parser = argparse.ArgumentParser(description='PyTorch SVHN Example')
 parser.add_argument('--type', default='cifar10', help='|'.join(selector.known_models))
 parser.add_argument('--batch_size', type=int, default=100, help='input batch size for training')
-parser.add_argument('--hessian_ssr', type=float, default=0.1, help='subsample rate for computing hessian')
 parser.add_argument('--gpu', default=None, help='index of gpus to use')
 parser.add_argument('--ngpu', type=int, default=2, help='number of gpus to use')
 parser.add_argument('--seed', type=int, default=117, help='random seed (default: 1)')
 parser.add_argument('--model_root', default='~/.torch/models/', help='folder to save the model')
 parser.add_argument('--data_root', default='/tmp/public_dataset/pytorch/', help='folder to save the model')
+parser.add_argument('--importance_root', default='weight_importances/', help='folder to save weight importances')
 parser.add_argument('--logdir', default='log/default', help='folder to save to the log')
 parser.add_argument('--input_size', type=int, default=224, help='input size of image')
 parser.add_argument('--n_sample', type=int, default=20, help='number of samples to infer the scaling factor')
@@ -50,6 +50,7 @@ parser.add_argument('--max_iter', default=30, type=int, help='max iteration for 
 parser.add_argument('--quant_finetune', default=False, type=bool, help='finetune after quantization or not')
 parser.add_argument('--quant_finetune_lr', default=1e-3, type=float, help='learning rate for after-quant finetune')
 parser.add_argument('--quant_finetune_epoch', default=12, type=int, help='num of epochs for after-quant finetune')
+parser.add_argument('--is_pruned', default=False, type=bool, help='is the model pruned or not')
 args = parser.parse_args()
 
 args.gpu = misc.auto_select_gpu(utility_bound=0, num_gpu=args.ngpu, selected_gpus=args.gpu)
@@ -75,30 +76,28 @@ def quantize(model, weight_importance, weight_hessian, valid_ind, n_clusters, is
     assert len(n_clusters) == len(valid_ind)
     print('==>quantization clusters: {}'.format(n_clusters))
 
-    is_pruned = False if args.prune_mode == 'none' else True
-
     quantize_layer_size = []
     for i, layer in enumerate(model.modules()):
         if i in valid_ind:
             quantize_layer_size.append([np.prod(layer.weight.size())])
 
-    centroid_label_dict = quantize_model(model, weight_importance, weight_hessian, valid_ind, n_clusters, max_iter=args.max_iter, mode='cpu', is_pruned=is_pruned, ha=args.ha, entropy_reg = args.entropy_reg)
+    centroid_label_dict = quantize_model(model, weight_importance, weight_hessian, valid_ind, n_clusters, max_iter=args.max_iter, mode='cpu', is_pruned=args.is_pruned, ha=args.ha, entropy_reg = args.entropy_reg)
 
     #Now get the overall compression rate
     huffman_size = get_huffmaned_weight_size(centroid_label_dict, quantize_layer_size, n_clusters)
     org_size = get_original_weight_size(quantize_layer_size)
-    return huffman_size * 1.0 / org_size
+    return huffman_size * 1.0 / org_size, centroid_label_dict
 
-def get_importance(importance_type, t=1.0, ssr=1.0):
+def get_importance(importance_type, t=1.0):
     #load file
     filename = args.type+"_"+importance_type
     if t > 1.0:
         filename += "_t="+str(int(t))
-    if importance_type == 'hessian' and ssr < 1.0:
-        filename += "_ssr="+str(int(ssr*1000))
     filename += ".pth"
     pathname = args.importance_root+args.type
     filepath = os.path.join(pathname, filename)
+
+    assert os.path.isfile(filepath), "Please check whether importance file exist"
 
     with open(filepath, "rb") as f:
         weight_importance = torch.load(f)
@@ -179,7 +178,7 @@ def adjust_learning_rate(optimizer, epoch):
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
-def finetune(model, centroid_label_dict, train_ds, val_ds, valid_ind, is_imagenet)
+def finetune(model, centroid_label_dict, train_ds, val_ds, valid_ind, is_imagenet):
     # fine-tune to preserve accuracy
     criterion = nn.CrossEntropyLoss().cuda()
 
@@ -243,12 +242,12 @@ def main():
     if args.mode == 'normal':
         weight_importance = get_importance(importance_type='normal')
     elif args.mode == 'hessian':
-        weight_importance = get_importance(importance_type='hessian', t=args.temperature, ssr=args.hessian_ssr)
+        weight_importance = get_importance(importance_type='hessian', t=args.temperature)
     elif args.mode == 'gradient':
         weight_importance = get_importance(importance_type='gradient', t=args.temperature)
     #get weight hessian
     if args.hessian_mode == 'true':
-        weight_hessian = get_importance(importance_type='hessian', t=args.temperature, ssr=args.hessian_ssr)
+        weight_hessian = get_importance(importance_type='hessian', t=args.temperature)
     else:
         weight_hessian = get_importance(importance_type='normal')
 

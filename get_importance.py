@@ -26,7 +26,7 @@ parser.add_argument('--type', default='cifar10', help='|'.join(selector.known_mo
 parser.add_argument('--mode', default='normal', help='mode of weight importance: normal/gradient/hessian')
 parser.add_argument('--batch_size', type=int, default=10, help='batch size for computing importance')
 parser.add_argument('--temperature', type=float, default=1.0, help='temperature for model calibration')
-parser.add_argument('--hessian_ssr', type=float, default=0.1, help='subsample rate for computing hessian')
+parser.add_argument('--hessian_ssr', type=float, default=0.25, help='subsample rate for computing hessian')
 parser.add_argument('--gpu', default=None, help='index of gpus to use')
 parser.add_argument('--ngpu', type=int, default=2, help='number of gpus to use')
 parser.add_argument('--seed', type=int, default=117, help='random seed (default: 1)')
@@ -179,10 +179,10 @@ def main():
     filename = args.type+"_"+args.mode
     if args.temperature > 1.0:
         filename += "_t="+str(int(args.temperature))
-    if args.mode == 'hessian' and args.hessian_ssr < 1.0:
-        filename += "_ssr="+str(int(args.hessian_ssr*1000))
     filename += ".pth"
     pathname = args.save_root+args.type
+    if not os.path.exists(pathname):
+        os.mkdir(pathname)
     filepath = os.path.join(pathname, filename)
     with open(filepath, "wb") as f:
         torch.save(weight_importance, f)

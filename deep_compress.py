@@ -24,8 +24,6 @@ import time
 parser = argparse.ArgumentParser(description='PyTorch SVHN Example')
 parser.add_argument('--type', default='cifar10', help='|'.join(selector.known_models))
 parser.add_argument('--batch_size', type=int, default=100, help='input batch size for training')
-parser.add_argument('--gbs', type=int, default=10, help='batch size for computing gradient square')
-parser.add_argument('--hbs', type=int, default=100, help='batch size for computing hessian')
 parser.add_argument('--gpu', default=None, help='index of gpus to use')
 parser.add_argument('--ngpu', type=int, default=2, help='number of gpus to use')
 parser.add_argument('--seed', type=int, default=117, help='random seed (default: 1)')
@@ -48,10 +46,11 @@ parser.add_argument('--max_iter', default=30, type=int, help='max iteration for 
 parser.add_argument('--quant_finetune', default=False, type=bool, help='finetune after quantization or not')
 parser.add_argument('--quant_finetune_lr', default=1e-3, type=float, help='learning rate for after-quant finetune')
 parser.add_argument('--quant_finetune_epoch', default=12, type=int, help='num of epochs for after-quant finetune')
+parser.add_argument('--is_pruned', default=False, type=bool, help='Is pruned model or not?')
 #Retrain argument
 parser.add_argument('--number_of_models', default=5, type=int, help='number of models to use')
-parser.add_argument('--subsample_rate', default=0.02, type=float, help='subsampling rate')
-parser.add_argument('--save_root', default='retrained_models/', help='folder for retrained models')
+parser.add_argument('--subsample_rate', default=0.05, type=float, help='subsampling rate')
+parser.add_argument('--save_root', default='sub_models/', help='folder for retrained models')
 args = parser.parse_args()
 
 args.gpu = misc.auto_select_gpu(utility_bound=0, num_gpu=args.ngpu, selected_gpus=args.gpu)
@@ -77,115 +76,32 @@ def quantize(model, weight_importance, weight_hessian, valid_ind, n_clusters, is
     assert len(n_clusters) == len(valid_ind)
     print('==>quantization clusters: {}'.format(n_clusters))
 
-    is_pruned = False if args.prune_mode == 'none' else True
-
     quantize_layer_size = []
     for i, layer in enumerate(model.modules()):
         if i in valid_ind:
             quantize_layer_size.append([np.prod(layer.weight.size())])
 
-    centroid_label_dict = quantize_model(model, weight_importance, [], valid_ind, n_clusters, max_iter=args.max_iter, mode='cpu', is_pruned=is_pruned, diameter_reg = args.diameter_reg, diameter_entropy_reg = args.diameter_entropy_reg)
+    centroid_label_dict = quantize_model(model, weight_importance, weight_hessian, valid_ind, n_clusters, max_iter=args.max_iter, mode='cpu', is_pruned=args.is_pruned, diameter_reg = args.diameter_reg, diameter_entropy_reg = args.diameter_entropy_reg)
 
     #Now get the overall compression rate
     huffman_size = get_huffmaned_weight_size(centroid_label_dict, quantize_layer_size, n_clusters)
     org_size = get_original_weight_size(quantize_layer_size)
-    return huffman_size * 1.0 / org_size
+    return huffman_size * 1.0 / org_size, centroid_label_dict
 
-def get_importance(model, ds_for_importance, valid_ind, is_imagenet, importance_type):
-    if importance_type == 'normal':
-        return get_all_one_importance(model, valid_ind, is_imagenet)
-    elif importance_type == 'gradient':
-        return get_gradient_importance(model, ds_for_importance, valid_ind, is_imagenet)
-    elif importance_type == 'hessian':
-        return get_hessian_importance(model, ds_for_importance, valid_ind, is_imagenet)
+def get_importance(importance_type, index, t=1.0):
+    #load file
+    filename = args.type+"_"+importance_type+"_"+str(index)
+    if args.temperature > 1.0:
+        filename += "_t="+str(int(args.temperature))
+    filename += ".pth"
+    pathname = args.save_root+args.type+"/ssr="+str(int(args.subsample_rate*1000))
+    filepath = os.path.join(pathname, filename)
 
-def get_all_one_importance(model, valid_ind, is_imagenet):
-    m_list = list(model.modules())
-    importances = {}
-    for ix in valid_ind:
-        m = m_list[ix]
-        importances[ix] = torch.ones_like(m.weight) 
-    return importances
+    assert os.path.isfile(filepath), "Please check "+filepath+" exists"
 
-def get_gradient_importance(model, ds_for_importance, valid_ind, is_imagenet):
-    criterion = nn.CrossEntropyLoss()
-    m_list = list(model.modules())
-    importances = {}
-    for ix in valid_ind:
-        importances[ix] = 0.
-
-    if 'inception' in args.type or args.optimizer == 'rmsprop':
-        optimizer = torch.optim.RMSprop(model.parameters(), lr=1e-3, alpha=0.9, eps=1.0, momentum=0.9)
-    else:
-        optimizer = torch.optim.SGD(model.parameters(), lr=1e-3, momentum=0.9, weight_decay=1e-4)
-
-    for i, (input, target) in enumerate(tqdm.tqdm(ds_for_importance, total=len(ds_for_importance))):
-        optimizer.zero_grad()
-        if is_imagenet:
-            input = torch.from_numpy(input)
-            target = torch.from_numpy(target)
-        target = target.cuda(async=True)
-        input_var = torch.autograd.Variable(input).cuda()
-        target_var = torch.autograd.Variable(target).cuda()
-
-        if 'inception' in args.type:
-            output, aux_output = model(input_var)
-            loss = criterion(output / args.temperature, target_var) + criterion(aux_output / args.temperature, target_var)
-        else:
-            output = model(input_var)
-            loss = criterion(output / args.temperature, target_var)
-        
-        loss.backward()
-
-        for ix in valid_ind:
-            m = m_list[ix]
-            importances[ix] += m.weight.grad.data**2 
-            
-    for ix in valid_ind:
-        importances[ix] = importances[ix] / importances[ix].mean()
-        
-    return importances
-
-def get_hessian_importance(model, ds_for_importance, valid_ind, is_imagenet):
-    criterion = nn.CrossEntropyLoss()
-    m_list = list(model.modules())
-    importances = {}
-    for ix in valid_ind:
-        importances[ix] = 0.
-
-    if 'inception' in args.type or args.optimizer == 'rmsprop':
-        optimizer = torch.optim.RMSprop(model.parameters(), lr=1e-3, alpha=0.9, eps=1.0, momentum=0.9)
-    else:
-        optimizer = torch.optim.SGD(model.parameters(), lr=1e-3, momentum=0.9, weight_decay=1e-4)
-
-    for i, (input, target) in enumerate(tqdm.tqdm(ds_for_importance, total=len(ds_for_importance))):
-        optimizer.zero_grad()
-        if is_imagenet:
-            input = torch.from_numpy(input)
-            target = torch.from_numpy(target)
-        target = target.cuda(async=True)
-        input_var = torch.autograd.Variable(input).cuda()
-        target_var = torch.autograd.Variable(target).cuda()
-
-        if 'inception' in args.type:
-            output, aux_output = model(input_var)
-            loss = (criterion(output / args.temperature, target_var) + criterion(aux_output / args.temperature, target_var))**2
-        else:
-            output = model(input_var)
-            loss = criterion(output / args.temperature, target_var)**2
-
-       # dhs = diagonal_hessian_multi(loss, output, model.parameters()) 
-      
-        for ii in range(len(valid_ind)):
-            ix = valid_ind[ii]
-            m = m_list[ix]
-            dhs = diagonal_hessian_multi(loss, output, [m.weight])
-            importances[ix] += dhs[0] 
-            
-    for ix in valid_ind:
-        importances[ix] = importances[ix] / importances[ix].mean()
-        
-    return importances
+    with open(filepath, "rb") as f:
+        weight_importance = torch.load(f)
+    return weight_importance
 
 def train(train_ds, model, criterion, optimizer, epoch, valid_ind, mask_list, is_imagenet):
     batch_time = AverageMeter()
@@ -262,7 +178,7 @@ def adjust_learning_rate(optimizer, epoch):
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
-def finetune(model, centroid_label_dict, train_ds, val_ds, valid_ind, is_imagenet)
+def finetune(model, centroid_label_dict, train_ds, val_ds, valid_ind, is_imagenet):
     # fine-tune to preserve accuracy
     criterion = nn.CrossEntropyLoss().cuda()
 
@@ -319,9 +235,11 @@ def main():
     #iterate over all retrained models
     for i in range(args.number_of_models):
         #load retrained model
-        filename = "retrained_i="+str(i)+"_ssr="+str(int(args.subsample_rate*1000))+"_"+args.type+".pth.tar"
-        pathname = args.save_root+args.type
+        filename = args.type+"_model_"+str(i)+".pth.tar"
+        pathname = args.save_root+args.type+"/ssr="+str(int(args.subsample_rate*1000))
         filepath = os.path.join(pathname, filename)
+        assert os.path.isfile(filepath), "Can not find model"
+
         with open(filepath, "rb") as f:
             print("Loading model parameters from"+filepath)
             checkpoint = torch.load(f)
@@ -333,27 +251,25 @@ def main():
         val_ds = ds_fetcher(args.batch_size, data_root=args.data_root, train=False, input_size=args.input_size)
     
         #get weight importance
-        #TODO: change to loading pre-computede importances later
         if args.mode == 'hessian':
-            ds_for_importance = ds_fetcher(args.hbs, data_root=args.data_root, val=False, subsample=True, indices=ds_indices, input_size=args.input_size)
-            weight_importance = get_importance(model_raw, ds_for_importance, valid_ind, is_imagenet, importance_type='hessian')
+            weight_importance = get_importance('hessian', i, t=args.temperature)
         elif args.mode == 'gradient':
-            ds_for_importance = ds_fetcher(args.gbs, data_root=args.data_root, val=False, subsample=True, indices=ds_indices, input_size=args.input_size)
-            weight_importance = get_importance(model_raw, ds_for_importance, valid_ind, is_imagenet, importance_type='gradient')
+            weight_importance = get_importance('gradient', i, t=args.temperature)
         else:
-            weight_importance = get_importance(model_raw, train_ds, valid_ind, is_imagenet, importance_type='normal')
-
+            weight_importance = get_importance('normal', i)
+        weight_hessian = get_importance('normal', i)
+        
         # eval raw model
         metrics[1,i], metrics[2,i], metrics[3,i], metrics[4,i], metrics[5,i], metrics[6,i] = eval_and_print(model_raw, train_ds, val_ds, is_imagenet, prefix_str="Retrained model number %d"%i)
 
         #quantize
-        metrics[0,i], cl_list = quantize(model_raw, weight_importance, valid_ind, clusters, is_imagenet)
-        print("Quantization, ratio={:.4f}".format(compress_ratio))
+        metrics[0,i], cl_list = quantize(model_raw, weight_importance, weight_hessian, valid_ind, clusters, is_imagenet)
+        #print("Quantization, ratio={:.4f}".format(metrics[0,i]))
         metrics[7,i], metrics[8,i], metrics[9,i], metrics[10,i], metrics[11,i], metrics[12,i] = eval_and_print(model_raw, train_ds, val_ds, is_imagenet, prefix_str="After quantization number %d"%i)
 
         if args.quant_finetune:
             finetune(model_raw, cl_list, train_ds, val_ds, valid_ind, is_imagenet)
-            print("Quantization and finetune, ratio={:.4f}".format(compress_ratio))
+            #print("Quantization and finetune, ratio={:.4f}".format(metrics[0,i]))
             metrics[13,i], metrics[14,i], metrics[15,i], metrics[16,i], metrics[17,i], metrics[18,i] = eval_and_print(model_raw, train_ds, val_ds, is_imagenet, prefix_str="After finetune number %d"%i)
 
     #print average performance

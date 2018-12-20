@@ -29,7 +29,7 @@ parser.add_argument('--model_root', default='~/.torch/models/', help='folder to 
 parser.add_argument('--data_root', default='/tmp/public_dataset/pytorch/', help='folder to save the model')
 parser.add_argument('--input_size', type=int, default=224, help='input size of image')
 parser.add_argument('--optimizer', default='sgd', type=str, help='type of optimizer')
-parser.add_argument('--save_root', default='retrained_models/', help='folder for retrained models')
+parser.add_argument('--save_root', default='sub_models/', help='folder for retrained models')
 parser.add_argument('--decay', default=1e-4, type=float, help='weight decay')
 #Retrain argument
 parser.add_argument('--number_of_models', default=20, type=int, help='number of independent models to retrain')
@@ -38,9 +38,98 @@ parser.add_argument('--lr', default=1e-2, type=float, help='learning rate for re
 parser.add_argument('--epoch', default=25, type=int, help='num of epochs for retrain')
 parser.add_argument('--eval_epoch', default=25, type=int, help='evaluate performance per how many epochs')
 parser.add_argument('--subsample_rate', default=1.0, type=float, help='subsample_rate for retrain')
+parser.add_argument('--compute_gradient', default=False, type=bool, help='compute gradient for retrained model')
+parser.add_argument('--compute_hessian', default=False, type=bool, help='compute hessian for retrained model')
+parser.add_argument('--temperature', default=1.0, type=float, help='temperature for model calibration')
 args = parser.parse_args()
 
 valid_layer_types = [nn.modules.conv.Conv2d, nn.modules.linear.Linear]
+
+def get_all_one_importance(model, valid_ind, is_imagenet):
+    m_list = list(model.modules())
+    importances = {}
+    for ix in valid_ind:
+        m = m_list[ix]
+        importances[ix] = torch.ones_like(m.weight) 
+    return importances
+
+def get_gradient_importance(model, ds_for_importance, valid_ind, is_imagenet):
+    criterion = nn.CrossEntropyLoss()
+    m_list = list(model.modules())
+    importances = {}
+    for ix in valid_ind:
+        importances[ix] = 0.
+    if 'inception' in args.type or args.optimizer == 'rmsprop':
+        optimizer = torch.optim.RMSprop(model.parameters(), lr=1e-3, alpha=0.9, eps=1.0, momentum=0.9)
+    else:
+        optimizer = torch.optim.SGD(model.parameters(), lr=1e-3, momentum=0.9, weight_decay=1e-4)
+
+    for i, (input, target) in enumerate(tqdm.tqdm(ds_for_importance, total=len(ds_for_importance))):
+        optimizer.zero_grad()
+        if is_imagenet:
+            input = torch.from_numpy(input)
+            target = torch.from_numpy(target)
+        target = target.cuda(async=True)
+        input_var = torch.autograd.Variable(input).cuda()
+        target_var = torch.autograd.Variable(target).cuda()
+
+        if 'inception' in args.type:
+            output, aux_output = model(input_var)
+            loss = criterion(output / args.temperature, target_var) + criterion(aux_output / args.temperature, target_var)
+        else:
+            output = model(input_var)
+            loss = criterion(output / args.temperature, target_var)
+        
+        loss.backward()
+
+        for ix in valid_ind:
+            m = m_list[ix]
+            importances[ix] += m.weight.grad.data**2
+
+    for ix in valid_ind:
+        importances[ix] = importances[ix] / importances[ix].mean()
+        
+    return importances
+
+def get_hessian_importance(model, ds_for_importance, valid_ind, is_imagenet):
+    criterion = nn.CrossEntropyLoss()
+    m_list = list(model.modules())
+    importances = {}
+    for ix in valid_ind:
+        importances[ix] = 0.
+    if 'inception' in args.type or args.optimizer == 'rmsprop':
+        optimizer = torch.optim.RMSprop(model.parameters(), lr=1e-3, alpha=0.9, eps=1.0, momentum=0.9)
+    else:
+        optimizer = torch.optim.SGD(model.parameters(), lr=1e-3, momentum=0.9, weight_decay=1e-4)
+
+    for i, (input, target) in enumerate(tqdm.tqdm(ds_for_importance, total=len(ds_for_importance))):
+        optimizer.zero_grad()
+        if is_imagenet:
+            input = torch.from_numpy(input)
+            target = torch.from_numpy(target)
+        target = target.cuda(async=True)
+        input_var = torch.autograd.Variable(input).cuda()
+        target_var = torch.autograd.Variable(target).cuda()
+
+        if 'inception' in args.type:
+            output, aux_output = model(input_var)
+            loss = (criterion(output / args.temperature, target_var) + criterion(aux_output / args.temperature, target_var))**2
+        else:
+            output = model(input_var)
+            loss = criterion(output / args.temperature, target_var)**2
+
+       # dhs = diagonal_hessian_multi(loss, output, model.parameters()) 
+      
+        for ii in range(len(valid_ind)):
+            ix = valid_ind[ii]
+            m = m_list[ix]
+            dhs = diagonal_hessian_multi(loss, output, [m.weight])
+            importances[ix] += dhs[0] 
+            
+    for ix in valid_ind:
+        importances[ix] = importances[ix] / importances[ix].mean()
+        
+    return importances
 
 def train(train_ds, model, criterion, optimizer, epoch, is_imagenet):
     batch_time = AverageMeter()
@@ -121,11 +210,6 @@ def retrain(model, train_ds, val_ds, valid_ind, is_imagenet):
         if (epoch+1)%args.eval_epoch == 0: 
             acc1_train, acc5_train, loss_train, acc1_val, acc5_val, loss_val = eval_and_print(model, train_ds, val_ds, is_imagenet, prefix_str="retraining epoch {}".format(epoch+1))
 
-        #if acc1 > best_acc:
-        #    best_acc = acc1
-        #    best_model = model
-
-    model = best_model
 
 def main():
     # load model and dataset fetcher
@@ -156,11 +240,13 @@ def main():
     
         # retrain model
         retrain(model_raw, train_ds, val_ds, valid_ind, is_imagenet)
-        acc1_train, acc5_train, loss_train, acc1_val, acc5_val, loss_val = eval_and_print(model_raw, train_ds, val_ds, is_imagenet, prefix_str="Retrained")
+        acc1_train, acc5_train, loss_train, acc1_val, acc5_val, loss_val = eval_and_print(model_raw, train_ds, val_ds, is_imagenet, prefix_str="Retrained "+str(i+args.starting_index))
 
         #save retrained model
-        filename = "retrained_i="+str(i+args.starting_index)+"_ssr="+str(int(args.subsample_rate*1000))+"_"+args.type+".pth.tar"
-        pathname = args.save_root+args.type
+        filename = args.type+"_model_"+str(i+args.starting_index)+".pth.tar"
+        pathname = args.save_root+args.type+"/ssr="+str(int(args.subsample_rate*1000))
+        if not os.path.exists(pathname):
+            os.makedirs(pathname)
         filepath = os.path.join(pathname, filename)
         with open(filepath, "wb") as f:
             torch.save({
@@ -169,6 +255,39 @@ def main():
                 'ds_indices': indices,
                 'model_state_dict': model_raw.state_dict(),
                 }, f)
+
+        #compute importance and write to file
+        weight_importance = get_all_one_importance(model_raw, valid_ind, is_imagenet)
+        filename = args.type+"_normal_"+str(i+args.starting_index)
+        if args.temperature > 1.0:
+            filename += "_t="+str(int(args.temperature))
+        filename += ".pth"
+        filepath = os.path.join(pathname, filename)
+        with open(filepath, "wb") as f:
+            torch.save(weight_importance, f)
+
+        if args.compute_gradient:
+            #compute importance and write to file
+            weight_importance = get_gradient_importance(model_raw, train_ds, valid_ind, is_imagenet)
+            filename = args.type+"_gradient_"+str(i+args.starting_index)
+            if args.temperature > 1.0:
+                filename += "_t="+str(int(args.temperature))
+            filename += ".pth"
+            filepath = os.path.join(pathname, filename)
+            with open(filepath, "wb") as f:
+                torch.save(weight_importance, f)
+
+        if args.compute_hessian:
+            #compute importance and write to file
+            weight_importance = get_hessian_importance(model_raw, train_ds, valid_ind, is_imagenet)
+            filename = args.type+"_hessian"+str(i+args.starting_index)
+            if args.temperature > 1.0:
+                filename += "_t="+str(int(args.temperature))
+            filename += ".pth"
+            filepath = os.path.join(pathname, filename)
+            with open(filepath, "wb") as f:
+                torch.save(weight_importance, f)
+
 
 if __name__ == '__main__':
     main()

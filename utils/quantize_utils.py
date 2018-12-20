@@ -314,7 +314,7 @@ def quantize_model(model, importances, hessians, quantize_index, quantize_cluste
     assert len(quantize_index) == len(quantize_clusters), \
         'You should provide the same number of bit setting as layer list!'
     assert importances is not None, 'Please provide weight importances'
-    assert hessian is not None, 'please provide hessians'
+    assert hessians is not None or ha==0.0, 'please provide hessians or set hessian to be zero'
     quantize_layer_cluster_dict = {n: b for n, b in zip(quantize_index, quantize_clusters)}
     centroid_label_dict = {}
 
@@ -337,6 +337,7 @@ def quantize_model(model, importances, hessians, quantize_index, quantize_cluste
         if hasattr(layer, 'weight'):
             w = layer.weight.data
             importance = importances[i]
+            hessian = hessians[i]
             nonzero_rate = importance.nonzero().size(0) * 100.0 / importance.numel()
             if is_pruned:
                 nz_mask = w.ne(0)
@@ -344,6 +345,7 @@ def quantize_model(model, importances, hessians, quantize_index, quantize_cluste
                 ori_shape = w.size()
                 w = w[nz_mask]
                 importance = importance[nz_mask]
+                hessian = hessian[nz_mask]
 
             if mode == 'cpu':
                 #centroids, labels = k_means_cpu(w.cpu().numpy(), n_cluster[0], init=centroids_init, max_iter=max_iter)
@@ -373,6 +375,7 @@ def quantize_model(model, importances, hessians, quantize_index, quantize_cluste
         if hasattr(layer, 'bias') and quantize_bias:
             w = layer.bias.data
             importance = importances[i]
+            hessian = hessians[i]
 
             if mode == 'cpu':
                 #centroids, labels = k_means_cpu(w.cpu().numpy(), n_cluster[0], init=centroids_init, max_iter=max_iter)

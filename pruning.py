@@ -24,9 +24,6 @@ import time
 parser = argparse.ArgumentParser(description='PyTorch SVHN Example')
 parser.add_argument('--type', default='cifar10', help='|'.join(selector.known_models))
 parser.add_argument('--batch_size', type=int, default=100, help='input batch size for training')
-parser.add_argument('--gbs', type=int, default=10, help='batch size for computing gradient square')
-parser.add_argument('--hbs', type=int, default=10, help='batch size for computing hessian')
-parser.add_argument('--hessian_ssr', type=float, default=0.1, help='subsample rate for computing hessian')
 parser.add_argument('--gpu', default=None, help='index of gpus to use')
 parser.add_argument('--ngpu', type=int, default=2, help='number of gpus to use')
 parser.add_argument('--seed', type=int, default=117, help='random seed (default: 1)')
@@ -94,16 +91,16 @@ def prune(model, weight_importance, weight_hessian, valid_ind, ratios, is_imagen
     total_compress_ratio = (full_size - pruned_size) * 1.0 / full_size
     return mask_list, total_compress_ratio
 
-def get_importance(importance_type, t=1.0, ssr=1.0):
+def get_importance(importance_type, t=1.0):
     #load file
     filename = args.type+"_"+importance_type
     if t > 1.0:
         filename += "_t="+str(int(t))
-    if importance_type == 'hessian' and ssr < 1.0:
-        filename += "_ssr="+str(int(ssr*1000))
     filename += ".pth"
     pathname = args.importance_root+args.type
     filepath = os.path.join(pathname, filename)
+
+    assert os.path.isfile(filepath), "Please check whether importance file exists"
 
     with open(filepath, "rb") as f:
         weight_importance = torch.load(f)
@@ -250,12 +247,12 @@ def main():
         if args.mode == 'normal':
             weight_importance = get_importance(importance_type='normal')
         elif args.mode == 'hessian':
-            weight_importance = get_importance(importance_type='hessian', t=args.temperature, ssr=args.hessian_ssr)
+            weight_importance = get_importance(importance_type='hessian', t=args.temperature)
         elif args.mode == 'gradient':
             weight_importance = get_importance(importance_type='gradient', t=args.temperature)
         #get weight hessian
         if args.hessian_mode == 'true':
-            weight_hessian = get_importance(importance_type='hessian', t=args.temperature, ssr=args.hessian_ssr)
+            weight_hessian = get_importance(importance_type='hessian', t=args.temperature)
         else:
             weight_hessian = get_importance(importance_type='normal')
 
