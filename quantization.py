@@ -41,8 +41,8 @@ parser.add_argument('--loss', default='cross_entropy', type=str, help='loss func
 parser.add_argument('--bits', default=None, type=str, help='number of bits of quantization')
 parser.add_argument('--fix_bit', default=None, type=float, help='fix bit for every layer')
 parser.add_argument('--temperature', default=1.0, type=float, help='temperature for estimating gradient')
-parser.add_argument('--hessian_mode', default='fix', type=str, help='mode of hessian term: fix/true')
-parser.add_argument('--ha', default=0.0, type=float, help='estimate of average of H_ii/multiplier of true hessian')
+parser.add_argument('--ha', default=0.5, type=float, help='multiplier of hessian')
+parser.add_argument('--mu', default=0.0, type=float, help='stabilizer of hessian')
 parser.add_argument('--entropy_reg', default=0.0, type=float, help='entropy regularizer')
 #parser.add_argument('--diameter_reg', default=0.0, type=float, help='diameter regularizer')
 #parser.add_argument('--diameter_entropy_reg', default=0.0, type=float, help='diameter times entropyregularizer')
@@ -246,13 +246,16 @@ def main():
         weight_importance = get_importance(importance_type='normal')
     elif args.mode == 'hessian':
         weight_importance = get_importance(importance_type='hessian', t=args.temperature)
+        weight_importance_id = get_importance(importance_type='normal')
+        for ix in weight_importance:
+            weight_importance[ix] = weight_importance[ix] + args.mu*weight_importance_id[ix]
     elif args.mode == 'gradient':
         weight_importance = get_importance(importance_type='gradient', t=args.temperature)
     #get weight hessian
-    if args.hessian_mode == 'true':
-        weight_hessian = get_importance(importance_type='hessian', t=args.temperature)
-    else:
-        weight_hessian = get_importance(importance_type='normal')
+    weight_hessian = get_importance(importance_type='hessian', t=args.temperature)
+    weight_hessian_id = get_importance(importance_type='normal')
+    for ix in weight_hessian:
+        weight_hessian[ix] = weight_hessian[ix] + args.mu*weight_hessian_id[ix]
 
     #quantize
     compress_ratio, cl_list = quantize(model_raw, weight_importance, weight_hessian, valid_ind, clusters, is_imagenet)
