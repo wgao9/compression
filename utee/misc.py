@@ -28,7 +28,7 @@ class Logger(object):
             self._logger.addHandler(ch)
 
     def info(self, str_info):
-        self.init('/tmp', 'tmp.log')
+        self.init('tmp', 'tmp.log')
         self._logger.info(str_info)
 logger = Logger()
 

@@ -24,6 +24,8 @@ import time
 parser = argparse.ArgumentParser(description='PyTorch SVHN Example')
 parser.add_argument('--type', default='cifar10', help='|'.join(selector.known_models))
 parser.add_argument('--mode', default='normal', help='mode of weight importance: normal/gradient/hessian')
+parser.add_argument('--loss', default='cross_entropy', help='loss function used for computing importance')
+parser.add_argument('--soft', default=1.0, type=float, help='soft label')
 parser.add_argument('--batch_size', type=int, default=10, help='batch size for computing importance')
 parser.add_argument('--temperature', type=float, default=1.0, help='temperature for model calibration')
 parser.add_argument('--hessian_ssr', type=float, default=0.25, help='subsample rate for computing hessian')
@@ -68,7 +70,15 @@ def get_all_one_importance(model, valid_ind, is_imagenet):
     return importances
 
 def get_gradient_importance(model, ds_for_importance, valid_ind, is_imagenet):
-    criterion = nn.CrossEntropyLoss()
+    if args.loss in ['mse','MSE']:
+        criterion = nn.MSELoss()
+    elif 'soft' in args.loss:
+        criterion = nn.KLDivLoss()
+    else:
+        criterion = nn.CrossEntropyLoss()
+    sm = nn.Softmax(dim=1)
+    lsm = nn.LogSoftmax(dim=1)
+
     m_list = list(model.modules())
     importances = {}
     for ix in valid_ind:
@@ -83,6 +93,17 @@ def get_gradient_importance(model, ds_for_importance, valid_ind, is_imagenet):
         if is_imagenet:
             input = torch.from_numpy(input)
             target = torch.from_numpy(target)
+
+        if args.loss in ['mse', 'MSE']:
+            target_onehot = torch.zeros(args.batch_size, 10).scatter_(1, torch.LongTensor(target.view(args.batch_size, 1)), 1)
+            target_onehot = target_onehot.cuda(async=True)
+            target_onehot_var = torch.autograd.Variable(target_onehot).cuda()
+        elif 'soft' in args.loss:
+            target_onehot = torch.zeros(args.batch_size, 10).scatter_(1, torch.LongTensor(target.view(args.batch_size, 1)), 1)
+            target_soft = ((1-args.soft)/10)*torch.ones(args.batch_size, 10) +args.soft*target_onehot
+            target_soft = target_soft.cuda(async=True)
+            target_soft_var = torch.autograd.Variable(target_soft).cuda()
+
         target = target.cuda(async=True)
         input_var = torch.autograd.Variable(input).cuda()
         target_var = torch.autograd.Variable(target).cuda()
@@ -90,6 +111,12 @@ def get_gradient_importance(model, ds_for_importance, valid_ind, is_imagenet):
         if 'inception' in args.type:
             output, aux_output = model(input_var)
             loss = criterion(output / args.temperature, target_var) + criterion(aux_output / args.temperature, target_var)
+        elif args.loss in ['mse', 'MSE']:
+            output = model(input_var)
+            loss = criterion(sm(output / args.temperature), target_onehot_var)
+        elif 'soft' in args.loss:
+            output = model(input_var)
+            loss = criterion(lsm(output / args.temperature), target_soft_var)
         else:
             output = model(input_var)
             loss = criterion(output / args.temperature, target_var)
@@ -106,7 +133,15 @@ def get_gradient_importance(model, ds_for_importance, valid_ind, is_imagenet):
     return importances
 
 def get_hessian_importance(model, ds_for_importance, valid_ind, is_imagenet):
-    criterion = nn.CrossEntropyLoss()
+    if args.loss in ['mse','MSE']:
+        criterion = nn.MSELoss()
+    elif 'soft' in args.loss:
+        criterion = nn.KLDivLoss()
+    else:
+        criterion = nn.CrossEntropyLoss()
+    sm = nn.Softmax(dim=1)
+    lsm = nn.Softmax(dim=1)
+
     m_list = list(model.modules())
     importances = {}
     for ix in valid_ind:
@@ -121,6 +156,17 @@ def get_hessian_importance(model, ds_for_importance, valid_ind, is_imagenet):
         if is_imagenet:
             input = torch.from_numpy(input)
             target = torch.from_numpy(target)
+
+        if args.loss in ['mse', 'MSE']:
+            target_onehot = torch.zeros(args.batch_size, 10).scatter_(1, torch.LongTensor(target.view(args.batch_size, 1)), 1)
+            target_onehot = target_onehot.cuda(async=True)
+            target_onehot_var = torch.autograd.Variable(target_onehot).cuda()
+        elif 'soft' in args.loss:
+            target_onehot = torch.zeros(args.batch_size, 10).scatter_(1, torch.LongTensor(target.view(args.batch_size, 1)), 1)
+            target_soft = ((1-args.soft)/10)*torch.ones(args.batch_size, 10) +args.soft*target_onehot
+            target_soft = target_soft.cuda(async=True)
+            target_soft_var = torch.autograd.Variable(target_soft).cuda()
+
         target = target.cuda(async=True)
         input_var = torch.autograd.Variable(input).cuda()
         target_var = torch.autograd.Variable(target).cuda()
@@ -128,6 +174,12 @@ def get_hessian_importance(model, ds_for_importance, valid_ind, is_imagenet):
         if 'inception' in args.type:
             output, aux_output = model(input_var)
             loss = (criterion(output / args.temperature, target_var) + criterion(aux_output / args.temperature, target_var))**2
+        elif args.loss in ['mse', 'MSE']:
+            output = model(input_var)
+            loss = criterion(sm(output / args.temperature), target_onehot_var)**2
+        elif 'soft' in args.loss:
+            output = model(input_var)
+            loss = criterion(lsm(output / args.temperature), target_soft_var)**2
         else:
             output = model(input_var)
             loss = criterion(output / args.temperature, target_var)**2
@@ -177,6 +229,8 @@ def main():
 
     #write to file
     filename = args.type+"_"+args.mode
+    if args.loss != 'cross_entropy':
+        filename += "_"+args.loss
     if args.temperature > 1.0:
         filename += "_t="+str(int(args.temperature))
     filename += ".pth"

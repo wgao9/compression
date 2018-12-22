@@ -37,6 +37,7 @@ parser.add_argument('--optimizer', default='sgd', type=str, help='type of optimi
 parser.add_argument('--decay', default=1e-4, type=float, help='weight decay')
 #Pruning arguments
 parser.add_argument('--mode', default='none', type=str, help='pruning mode: none/normal/gradient/hessian')
+parser.add_argument('--loss', default='cross_entropy', type=str, help='loss funciton')
 parser.add_argument('--ratios', default=None, type=str, help='ratios of pruning')
 parser.add_argument('--fix_ratio', default=None, type=float, help='fix ratio for every layer')
 parser.add_argument('--temperature', default=1.0, type=float, help='temperature for estimating gradient')
@@ -94,6 +95,8 @@ def prune(model, weight_importance, weight_hessian, valid_ind, ratios, is_imagen
 def get_importance(importance_type, t=1.0):
     #load file
     filename = args.type+"_"+importance_type
+    if args.loss != 'cross_entropy' and importance_type in ['gradient', 'hessian']:
+        filename += "_"+args.loss
     if t > 1.0:
         filename += "_t="+str(int(t))
     filename += ".pth"
