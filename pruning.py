@@ -41,7 +41,7 @@ parser.add_argument('--loss', default='cross_entropy', type=str, help='loss func
 parser.add_argument('--ratios', default=None, type=str, help='ratios of pruning')
 parser.add_argument('--fix_ratio', default=None, type=float, help='fix ratio for every layer')
 parser.add_argument('--temperature', default=1.0, type=float, help='temperature for estimating gradient')
-parser.add_argument('--ha', default=0.5, type=float, help='multiplier of true hessian')
+parser.add_argument('--ha', default=0.0, type=float, help='multiplier of true hessian')
 parser.add_argument('--mu', default=0.0, type=float, help='stabablizer for hessian, i.e. H=(1-mu)H+mu I')
 parser.add_argument('--modify_dropout', action='store_true', help='modify the rate of dropout')
 parser.add_argument('--stage', default=1, type=int, help='retrain stage 1/2/3')
@@ -68,6 +68,8 @@ torch.manual_seed(args.seed)
 torch.cuda.manual_seed(args.seed)
 
 valid_layer_types = [nn.modules.conv.Conv2d, nn.modules.linear.Linear]
+#valid_layer_types = [nn.modules.conv.Conv2d]
+#valid_layer_types = [nn.modules.linear.Linear]
 
 def prune(model, weight_importance, weight_hessian, valid_ind, ratios, is_imagenet):
     assert len(ratios) == len(valid_ind), (len(ratios), len(valid_ind))
@@ -208,12 +210,14 @@ def retrain(model, train_ds, val_ds, valid_ind, mask_list, is_imagenet):
 
     model = best_model
 
-def eval_and_print(model, train_ds, val_ds, is_imagenet, prefix_str=""):
-    acc1_train, acc5_train, loss_train = misc.eval_model(model, train_ds, ngpu=args.ngpu, is_imagenet=is_imagenet)
-    acc1_val, acc5_val, loss_val = misc.eval_model(model, val_ds, ngpu=args.ngpu, is_imagenet=is_imagenet)
-    print(prefix_str+" model, type={}, training acc1={:.4f}, acc5={:.4f}, loss={:.6f}".format(args.type, acc1_train, acc5_train, loss_train))
-    print(prefix_str+" model, type={}, validation acc1={:.4f}, acc5={:.4f}, loss={:.6f}".format(args.type, acc1_val, acc5_val, loss_val))
-    return acc1_train, acc5_train, loss_train, acc1_val, acc5_val, loss_val
+def eval_and_print(model, ds, is_imagenet, is_train,  prefix_str=""):
+    if is_train:
+        acc1, acc5, loss = misc.eval_model(model, ds, ngpu=args.ngpu, is_imagenet=is_imagenet)
+        print(prefix_str+" model, type={}, training acc1={:.4f}, acc5={:.4f}, loss={:.6f}".format(args.type, acc1, acc5, loss))
+    else:
+        acc1, acc5, loss = misc.eval_model(model, ds, ngpu=args.ngpu, is_imagenet=is_imagenet)
+        print(prefix_str+" model, type={}, validation acc1={:.4f}, acc5={:.4f}, loss={:.6f}".format(args.type, acc1, acc5, loss))
+    return acc1, acc5, loss
 
 def main():
     # load model and dataset fetcher
@@ -257,20 +261,28 @@ def main():
         elif args.mode == 'gradient':
             weight_importance = get_importance(importance_type='gradient', t=args.temperature)
         #get weight hessian
-        weight_hessian = get_importance(importance_type='hessian', t=args.temperature)
-        weight_hessian_id = get_importance(importance_type='normal')
-        for ix in weight_hessian:
-            weight_hessian[ix] = weight_hessian[ix] + args.mu*weight_hessian_id[ix]
+        if args.type in ['mnist', 'cifar10']:
+            weight_hessian = get_importance(importance_type='hessian', t=args.temperature)
+            weight_hessian_id = get_importance(importance_type='normal')
+            for ix in weight_hessian:
+                weight_hessian[ix] = weight_hessian[ix] + args.mu*weight_hessian_id[ix]
+        else:
+            #TODO: delete this if hessian for cifar100 and alexnet has been computed
+            weight_hessian = get_importance(importance_type='normal')
 
         #prune
         mask_list, compression_ratio = prune(model_raw, weight_importance, weight_hessian, valid_ind, ratios, is_imagenet)
         print("Pruning stage {}, compression ratio {:.4f}".format(stage+1, compression_ratio))
-        acc1_train, acc5_train, loss_train, acc1_val, acc5_val, loss_val = eval_and_print(model_raw, train_ds, val_ds, is_imagenet, prefix_str="Prune stage {}".format(stage+1))
+        if not is_imagenet:
+            acc1_train, acc5_train, loss_train  = eval_and_print(model_raw, train_ds, is_imagenet, is_train=True, prefix_str="Prune stage {}".format(stage+1))
+        acc1_val, acc5_val, loss_val = eval_and_print(model_raw, val_ds, is_imagenet, is_train=False, prefix_str="Prune stage {}".format(stage+1))
 
         #and finetune
         if args.prune_finetune:
             retrain(model_raw, train_ds, val_ds, valid_ind, mask_list, is_imagenet, is_retrain=False)
-            acc1_train, acc5_train, loss_train, acc1_val, acc5_val, loss_val = eval_and_print(model_raw, train_ds, val_ds, is_imagenet, prefix_str="Prune and finetune stage {}".format(stage+1))
+            if not is_imagenet:
+                acc1_train, acc5_train, loss_train  = eval_and_print(model_raw, train_ds, is_imagenet, is_train=True, prefix_str="Prune stage {}".format(stage+1))
+            acc1_val, acc5_val, loss_val = eval_and_print(model_raw, val_ds, is_imagenet, is_train=False, prefix_str="Prune stage {}".format(stage+1))
 
 
 if __name__ == '__main__':

@@ -215,6 +215,8 @@ def main():
     if args.mode == 'hessian' and args.hessian_ssr < 1.0:
         indices = np.random.choice(training_size, int(args.hessian_ssr*training_size/args.batch_size)*args.batch_size, replace=True)
         ds_for_importance = ds_fetcher(args.batch_size, data_root=args.data_root, val=False, subsample=True, indices=indices, input_size=args.input_size)
+    elif args.type not in ['mnist', 'cifar10', 'cifar100']:
+        ds_for_importance = ds_fetcher(args.batch_size, data_root=args.data_root, val=True, input_size=args.input_size)
     else:
         ds_for_importance = ds_fetcher(args.batch_size, data_root=args.data_root, val=False, input_size=args.input_size)
 

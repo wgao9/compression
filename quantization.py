@@ -41,7 +41,7 @@ parser.add_argument('--loss', default='cross_entropy', type=str, help='loss func
 parser.add_argument('--bits', default=None, type=str, help='number of bits of quantization')
 parser.add_argument('--fix_bit', default=None, type=float, help='fix bit for every layer')
 parser.add_argument('--temperature', default=1.0, type=float, help='temperature for estimating gradient')
-parser.add_argument('--ha', default=0.5, type=float, help='multiplier of hessian')
+parser.add_argument('--ha', default=0.0, type=float, help='multiplier of hessian')
 parser.add_argument('--mu', default=0.0, type=float, help='stabilizer of hessian')
 parser.add_argument('--entropy_reg', default=0.0, type=float, help='entropy regularizer')
 #parser.add_argument('--diameter_reg', default=0.0, type=float, help='diameter regularizer')
@@ -72,6 +72,8 @@ torch.manual_seed(args.seed)
 torch.cuda.manual_seed(args.seed)
 
 valid_layer_types = [nn.modules.conv.Conv2d, nn.modules.linear.Linear]
+#valid_layer_types = [nn.modules.linear.Linear]
+#valid_layer_types = [nn.modules.conv.Conv2d]
 
 def quantize(model, weight_importance, weight_hessian, valid_ind, n_clusters, is_imagenet):
     assert len(n_clusters) == len(valid_ind)
@@ -205,12 +207,14 @@ def finetune(model, centroid_label_dict, train_ds, val_ds, valid_ind, is_imagene
         if (epoch+1)%args.eval_epoch == 0: 
             eval_and_print(model, train_ds, val_ds, is_imagenet, prefix_str="retraining epoch {}".format(epoch+1))
 
-def eval_and_print(model, train_ds, val_ds, is_imagenet, prefix_str=""):
-    acc1_train, acc5_train, loss_train = misc.eval_model(model, train_ds, ngpu=args.ngpu, is_imagenet=is_imagenet)
-    acc1_val, acc5_val, loss_val = misc.eval_model(model, val_ds, ngpu=args.ngpu, is_imagenet=is_imagenet)
-    print(prefix_str+" model, type={}, training acc1={:.4f}, acc5={:.4f}, loss={:.6f}".format(args.type, acc1_train, acc5_train, loss_train))
-    print(prefix_str+" model, type={}, validation acc1={:.4f}, acc5={:.4f}, loss={:.6f}".format(args.type, acc1_val, acc5_val, loss_val))
-    return acc1_train, acc5_train, loss_train, acc1_val, acc5_val, loss_val
+def eval_and_print(model, ds, is_imagenet, is_train,  prefix_str=""):
+    if is_train:
+        acc1, acc5, loss = misc.eval_model(model, ds, ngpu=args.ngpu, is_imagenet=is_imagenet)
+        print(prefix_str+" model, type={}, training acc1={:.4f}, acc5={:.4f}, loss={:.6f}".format(args.type, acc1, acc5, loss))
+    else:
+        acc1, acc5, loss = misc.eval_model(model, ds, ngpu=args.ngpu, is_imagenet=is_imagenet)
+        print(prefix_str+" model, type={}, validation acc1={:.4f}, acc5={:.4f}, loss={:.6f}".format(args.type, acc1, acc5, loss))
+    return acc1, acc5, loss
 
 def main():
     # load model and dataset fetcher
@@ -251,21 +255,29 @@ def main():
             weight_importance[ix] = weight_importance[ix] + args.mu*weight_importance_id[ix]
     elif args.mode == 'gradient':
         weight_importance = get_importance(importance_type='gradient', t=args.temperature)
-    #get weight hessian
-    weight_hessian = get_importance(importance_type='hessian', t=args.temperature)
-    weight_hessian_id = get_importance(importance_type='normal')
-    for ix in weight_hessian:
-        weight_hessian[ix] = weight_hessian[ix] + args.mu*weight_hessian_id[ix]
+    if args.type in ['mnist', 'cifar10']:
+        #get weight hessian
+        weight_hessian = get_importance(importance_type='hessian', t=args.temperature)
+        weight_hessian_id = get_importance(importance_type='normal')
+        for ix in weight_hessian:
+            weight_hessian[ix] = weight_hessian[ix] + args.mu*weight_hessian_id[ix]
+    else:
+        #TODO: delete this after hessian of cifar100 and alexnet were implemented
+        weight_hessian = get_importance(importance_type='normal')
 
     #quantize
     compress_ratio, cl_list = quantize(model_raw, weight_importance, weight_hessian, valid_ind, clusters, is_imagenet)
     print("Quantization, ratio={:.4f}".format(compress_ratio))
-    acc1_train, acc5_train, loss_train, acc1_val, acc5_val, loss_val = eval_and_print(model_raw, train_ds, val_ds, is_imagenet, prefix_str="Quantization")
+    if not is_imagenet:
+        acc1_train, acc5_train, loss_train  = eval_and_print(model_raw, train_ds, is_imagenet, is_train=True, prefix_str="Quantization")
+    acc1_val, acc5_val, loss_val = eval_and_print(model_raw, val_ds, is_imagenet, is_train=False, prefix_str="Quantization")
 
     if args.quant_finetune:
         finetune(model_raw, cl_list, train_ds, val_ds, valid_ind, is_imagenet)
         print("Quantization and finetune, ratio={:.4f}".format(compress_ratio))
-        acc1_train, acc5_train, loss_train, acc1_val, acc5_val, loss_val = eval_and_print(model_raw, train_ds, val_ds, is_imagenet, prefix_str="Quantization")
+        if not is_imagenet:
+            acc1_train, acc5_train, loss_train  = eval_and_print(model_raw, train_ds, is_imagenet, is_train=True, prefix_str="Quantization and finetune")
+        acc1_val, acc5_val, loss_val = eval_and_print(model_raw, val_ds, is_imagenet, is_train=False, prefix_str="Quantization and finetune")
 
 
 if __name__ == '__main__':

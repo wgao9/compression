@@ -45,6 +45,7 @@ parser.add_argument('--mode', default='normal', type=str, help='quantization mod
 parser.add_argument('--loss', default='cross_entropy', type=str, help='loss funciton')
 parser.add_argument('--bits', default=None, type=str, help='number of bits of quantization')
 parser.add_argument('--fix_bit', default=None, type=float, help='fix bit for every layer')
+parser.add_argument('--mu', default=0.0, type=float, help='stabilizer of hessian')
 parser.add_argument('--diameter_reg', default=0.0, type=float, help='diameter regularizer')
 parser.add_argument('--diameter_entropy_reg', default=0.0, type=float, help='diameter times entropyregularizer')
 parser.add_argument('--centroids_init', default='quantile', type=str, help='initialization method of centroids: linear/quantile')
@@ -79,6 +80,8 @@ torch.manual_seed(args.seed)
 torch.cuda.manual_seed(args.seed)
 
 valid_layer_types = [nn.modules.conv.Conv2d, nn.modules.linear.Linear]
+#valid_layer_types = [nn.modules.linear.Linear]
+#valid_layer_types = [nn.modules.conv.Conv2d]
 
 def quantize(model, weight_importance, weight_hessian, valid_ind, n_clusters, is_imagenet):
     assert len(n_clusters) == len(valid_ind)
@@ -89,7 +92,7 @@ def quantize(model, weight_importance, weight_hessian, valid_ind, n_clusters, is
         if i in valid_ind:
             quantize_layer_size.append([np.prod(layer.weight.size())])
 
-    centroid_label_dict = quantize_model(model, weight_importance, weight_hessian, valid_ind, n_clusters, max_iter=args.max_iter, mode='cpu', is_pruned=args.is_pruned, diameter_reg = args.diameter_reg, diameter_entropy_reg = args.diameter_entropy_reg)
+    centroid_label_dict = quantize_model(model, weight_importance, weight_hessian, valid_ind, n_clusters, max_iter=args.max_iter, mode='cpu', is_pruned=args.is_pruned, ha=0.0, diameter_reg = args.diameter_reg, diameter_entropy_reg = args.diameter_entropy_reg)
 
     #Now get the overall compression rate
     huffman_size = get_huffmaned_weight_size(centroid_label_dict, quantize_layer_size, n_clusters)
@@ -212,12 +215,14 @@ def finetune(model, centroid_label_dict, train_ds, val_ds, valid_ind, is_imagene
         if (epoch+1)%args.eval_epoch == 0: 
             eval_and_print(model, train_ds, val_ds, is_imagenet, prefix_str="retraining epoch {}".format(epoch+1))
 
-def eval_and_print(model, train_ds, val_ds, is_imagenet, prefix_str=""):
-    acc1_train, acc5_train, loss_train = misc.eval_model(model, train_ds, ngpu=args.ngpu, is_imagenet=is_imagenet)
-    acc1_val, acc5_val, loss_val = misc.eval_model(model, val_ds, ngpu=args.ngpu, is_imagenet=is_imagenet)
-    print(prefix_str+" model, type={}, training acc1={:.4f}, acc5={:.4f}, loss={:.6f}".format(args.type, acc1_train, acc5_train, loss_train))
-    print(prefix_str+" model, type={}, validation acc1={:.4f}, acc5={:.4f}, loss={:.6f}".format(args.type, acc1_val, acc5_val, loss_val))
-    return acc1_train, acc5_train, loss_train, acc1_val, acc5_val, loss_val
+def eval_and_print(model, ds, is_imagenet, is_train,  prefix_str=""):
+    if is_train:
+        acc1, acc5, loss = misc.eval_model(model, ds, ngpu=args.ngpu, is_imagenet=is_imagenet)
+        print(prefix_str+" model, type={}, training acc1={:.4f}, acc5={:.4f}, loss={:.6f}".format(args.type, acc1, acc5, loss))
+    else:
+        acc1, acc5, loss = misc.eval_model(model, ds, ngpu=args.ngpu, is_imagenet=is_imagenet)
+        print(prefix_str+" model, type={}, validation acc1={:.4f}, acc5={:.4f}, loss={:.6f}".format(args.type, acc1, acc5, loss))
+    return acc1, acc5, loss
 
 def main():
     # load model and dataset fetcher
@@ -261,36 +266,56 @@ def main():
         val_ds = ds_fetcher(args.batch_size, data_root=args.data_root, train=False, input_size=args.input_size)
     
         #get weight importance
-        if args.mode == 'hessian':
+        if args.mode == 'normal':
+            weight_importance = get_importance('normal', i)
+        elif args.mode == 'hessian':
             weight_importance = get_importance('hessian', i, t=args.temperature)
+            weight_importance_id = get_importance('normal', i)
+            for ix in weight_importance:
+                weight_importance[ix] = weight_importance[ix] + args.mu*weight_importance_id[ix]
         elif args.mode == 'gradient':
             weight_importance = get_importance('gradient', i, t=args.temperature)
+        if args.type in ['mnist', 'cifar10']:
+            #get weight hessian
+            weight_hessian = get_importance('hessian', i, t=args.temperature)
+            weight_hessian_id = get_importance('normal', i)
+            for ix in weight_hessian:
+                weight_hessian[ix] = weight_hessian[ix] + args.mu*weight_hessian_id[ix]
         else:
-            weight_importance = get_importance('normal', i)
-        weight_hessian = get_importance('normal', i)
-        
+            #TODO: delete this after hessian of cifar100 and alexnet were implemented
+            weight_hessian = get_importance('normal', i)
+
         # eval raw model
-        metrics[1,i], metrics[2,i], metrics[3,i], metrics[4,i], metrics[5,i], metrics[6,i] = eval_and_print(model_raw, train_ds, val_ds, is_imagenet, prefix_str="Retrained model number %d"%i)
+        if not is_imagenet:
+            metrics[1,i], metrics[2,i], metrics[3,i] = eval_and_print(model_raw, train_ds, is_imagenet, is_train=True, prefix_str = "Retrained model number %d"%i) 
+        metrics[4,i], metrics[5,i], metrics[6,i] = eval_and_print(model_raw, val_ds, is_imagenet, is_train=False, prefix_str="Retrained model number %d"%i)
 
         #quantize
         metrics[0,i], cl_list = quantize(model_raw, weight_importance, weight_hessian, valid_ind, clusters, is_imagenet)
         #print("Quantization, ratio={:.4f}".format(metrics[0,i]))
-        metrics[7,i], metrics[8,i], metrics[9,i], metrics[10,i], metrics[11,i], metrics[12,i] = eval_and_print(model_raw, train_ds, val_ds, is_imagenet, prefix_str="After quantization number %d"%i)
+        if not is_imagenet:
+            metrics[7,i], metrics[8,i], metrics[9,i] = eval_and_print(model_raw, train_ds, is_imagenet, is_train=True, prefix_str="After quantization number %d"%i)
+        metrics[10,i], metrics[11,i], metrics[12,i] = eval_and_print(model_raw, val_ds, is_imagenet, is_train=False, prefix_str="After quantization number %d"%i)
 
         if args.quant_finetune:
             finetune(model_raw, cl_list, train_ds, val_ds, valid_ind, is_imagenet)
             #print("Quantization and finetune, ratio={:.4f}".format(metrics[0,i]))
-            metrics[13,i], metrics[14,i], metrics[15,i], metrics[16,i], metrics[17,i], metrics[18,i] = eval_and_print(model_raw, train_ds, val_ds, is_imagenet, prefix_str="After finetune number %d"%i)
+            if not is_imagenet:
+                metrics[13,i], metrics[14,i], metrics[15,i] = eval_and_print(model_raw, train_ds, is_imagenet, is_train=True, prefix_str="After finetune number %d"%i)
+            metrics[16,i], metrics[17,i], metrics[18,i] = eval_and_print(model_raw, val_ds, is_imagenet, is_train=False, prefix_str="After finetune number %d"%i)
 
     #print average performance
-    print("Before quantization, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}".format(args.type, np.mean(metrics[1]), np.std(metrics[1]), np.mean(metrics[2]), np.std(metrics[2]), np.mean(metrics[3]), np.std(metrics[3])))
+    if not is_imagenet:
+        print("Before quantization, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}".format(args.type, np.mean(metrics[1]), np.std(metrics[1]), np.mean(metrics[2]), np.std(metrics[2]), np.mean(metrics[3]), np.std(metrics[3])))
     print("Before quantization, type={}, validation acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}".format(args.type, np.mean(metrics[4]), np.std(metrics[4]), np.mean(metrics[5]), np.std(metrics[5]), np.mean(metrics[6]), np.std(metrics[6])))
     print("Compression ratio = {:.4f}+-{:.4f}".format(np.mean(metrics[0]), np.std(metrics[0])))
-    print("After quantization, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}".format(args.type, np.mean(metrics[7]), np.std(metrics[7]), np.mean(metrics[8]), np.std(metrics[8]), np.mean(metrics[9]), np.std(metrics[9])))
-    print("After quantization, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}".format(args.type, np.mean(metrics[10]), np.std(metrics[10]), np.mean(metrics[11]), np.std(metrics[11]), np.mean(metrics[12]), np.std(metrics[12])))
+    if not is_imagenet:
+        print("After quantization, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}".format(args.type, np.mean(metrics[7]), np.std(metrics[7]), np.mean(metrics[8]), np.std(metrics[8]), np.mean(metrics[9]), np.std(metrics[9])))
+    print("After quantization, type={}, validation acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}".format(args.type, np.mean(metrics[10]), np.std(metrics[10]), np.mean(metrics[11]), np.std(metrics[11]), np.mean(metrics[12]), np.std(metrics[12])))
     if args.quant_finetune:
-        print("After finetune, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}".format(args.type, np.mean(metrics[13]), np.std(metrics[13]), np.mean(metrics[14]), np.std(metrics[14]), np.mean(metrics[15]), np.std(metrics[15])))
-        print("After finetune, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}".format(args.type, np.mean(metrics[16]), np.std(metrics[16]), np.mean(metrics[17]), np.std(metrics[17]), np.mean(metrics[18]), np.std(metrics[18])))
+        if not is_imagenet:
+            print("After finetune, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}".format(args.type, np.mean(metrics[13]), np.std(metrics[13]), np.mean(metrics[14]), np.std(metrics[14]), np.mean(metrics[15]), np.std(metrics[15])))
+        print("After finetune, type={}, validation acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}".format(args.type, np.mean(metrics[16]), np.std(metrics[16]), np.mean(metrics[17]), np.std(metrics[17]), np.mean(metrics[18]), np.std(metrics[18])))
 
     if args.result_root != None:
         filename = args.type+"_"+args.mode+"_"+args.result_name
@@ -304,14 +329,17 @@ def main():
                 f.write(arg+" ")
             f.write("\n")
             f.write("\n")
-            f.write("Before quantization, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f} \n".format(args.type, np.mean(metrics[1]), np.std(metrics[1]), np.mean(metrics[2]), np.std(metrics[2]), np.mean(metrics[3]), np.std(metrics[3])))
+            if not is_imagenet:
+                f.write("Before quantization, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f} \n".format(args.type, np.mean(metrics[1]), np.std(metrics[1]), np.mean(metrics[2]), np.std(metrics[2]), np.mean(metrics[3]), np.std(metrics[3])))
             f.write("Before quantization, type={}, validation acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f} \n".format(args.type, np.mean(metrics[4]), np.std(metrics[4]), np.mean(metrics[5]), np.std(metrics[5]), np.mean(metrics[6]), np.std(metrics[6])))
             f.write("Compression ratio = {:.4f}+-{:.4f} \n".format(np.mean(metrics[0]), np.std(metrics[0])))
-            f.write("After quantization, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f} \n".format(args.type, np.mean(metrics[7]), np.std(metrics[7]), np.mean(metrics[8]), np.std(metrics[8]), np.mean(metrics[9]), np.std(metrics[9])))
-            f.write("After quantization, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f} \n".format(args.type, np.mean(metrics[10]), np.std(metrics[10]), np.mean(metrics[11]), np.std(metrics[11]), np.mean(metrics[12]), np.std(metrics[12])))
+            if not is_imagenet:
+                f.write("After quantization, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f} \n".format(args.type, np.mean(metrics[7]), np.std(metrics[7]), np.mean(metrics[8]), np.std(metrics[8]), np.mean(metrics[9]), np.std(metrics[9])))
+            f.write("After quantization, type={}, validation acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f} \n".format(args.type, np.mean(metrics[10]), np.std(metrics[10]), np.mean(metrics[11]), np.std(metrics[11]), np.mean(metrics[12]), np.std(metrics[12])))
             if args.quant_finetune:
-                f.write("After finetune, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f} \n".format(args.type, np.mean(metrics[13]), np.std(metrics[13]), np.mean(metrics[14]), np.std(metrics[14]), np.mean(metrics[15]), np.std(metrics[15])))
-                f.write("After finetune, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f} \n".format(args.type, np.mean(metrics[16]), np.std(metrics[16]), np.mean(metrics[17]), np.std(metrics[17]), np.mean(metrics[18]), np.std(metrics[18])))
+                if not is_imagenet:
+                    f.write("After finetune, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f} \n".format(args.type, np.mean(metrics[13]), np.std(metrics[13]), np.mean(metrics[14]), np.std(metrics[14]), np.mean(metrics[15]), np.std(metrics[15])))
+                f.write("After finetune, type={}, validation acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f} \n".format(args.type, np.mean(metrics[16]), np.std(metrics[16]), np.mean(metrics[17]), np.std(metrics[17]), np.mean(metrics[18]), np.std(metrics[18])))
             
 
 if __name__ == '__main__':
