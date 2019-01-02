@@ -5,6 +5,7 @@ print = misc.logger.info
 from IPython import embed
 
 known_models = [
+    'synthetic',
     'mnist', 'svhn', # 28x28
     'cifar10', 'cifar100', # 32x32
     'stl10', # 96x96
@@ -14,6 +15,14 @@ known_models = [
     'squeezenet_v0', 'squeezenet_v1', #224x224
     'inception_v3', # 299x299
 ]
+
+def synthetic(cuda=True, model_root=None, input_dims=100, n_hidden=[50,20], output_dims=10, dropout=0.2):
+    print("Building and initializing synthetic parameters")
+    from synthetic import model, dataset
+    m = model.synthetic(input_dims, n_hidden, output_dims, dropout, pretrained=False)
+    if cuda:
+        m = m.cuda()
+    return m, dataset.get, False
 
 def mnist(cuda=True, model_root=None):
     print("Building and initializing mnist parameters")

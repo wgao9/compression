@@ -175,7 +175,7 @@ def eval_model(model, ds, n_sample=None, ngpu=1, is_imagenet=False):
         model = ModelWrapper(model)
     model = model.eval()
     model = torch.nn.DataParallel(model, device_ids=range(ngpu)).cuda()
-
+    
     n_sample = len(ds) if n_sample is None else n_sample
     criteria = nn.CrossEntropyLoss()
     for idx, (data, target) in enumerate(tqdm.tqdm(ds, total=n_sample)):
@@ -200,6 +200,29 @@ def eval_model(model, ds, n_sample=None, ngpu=1, is_imagenet=False):
     acc1 = correct1.numpy() * 1.0 / n_passed
     acc5 = correct5.numpy() * 1.0 / n_passed
     return acc1, acc5, loss/n_sample
+
+def eval_regression_model(model, ds, n_sample=None, ngpu=1):
+    import tqdm
+    import torch
+    from torch import nn
+    from torch.autograd import Variable
+
+    loss  = 0.0
+    n_passed = 0.0
+    model = model.eval()
+    model = torch.nn.DataParallel(model, device_ids=range(ngpu)).cuda()
+
+    n_sample = len(ds) if n_sample is None else n_sample
+    criteria = nn.MSELoss()
+    for idx, (data, target) in enumerate(tqdm.tqdm(ds, total=n_sample)):
+        n_passed += len(data)
+        data =  Variable(torch.FloatTensor(data)).cuda()
+        output = model(data)
+        loss += criteria(output, torch.autograd.Variable(target).cuda()).item()
+        if idx >= n_sample - 1:
+            break
+
+    return loss/n_sample
 
 def load_state_dict(model, model_urls, model_root):
     from torch.utils import model_zoo

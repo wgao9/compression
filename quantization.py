@@ -255,6 +255,8 @@ def main():
             weight_importance[ix] = weight_importance[ix] + args.mu*weight_importance_id[ix]
     elif args.mode == 'gradient':
         weight_importance = get_importance(importance_type='gradient', t=args.temperature)
+    elif args.mode == 'KL':
+        weight_importance = get_importance(importance_type='KL', t=args.temperature)
     if args.type in ['mnist', 'cifar10']:
         #get weight hessian
         weight_hessian = get_importance(importance_type='hessian', t=args.temperature)

@@ -28,7 +28,7 @@ parser.add_argument('--soft', default=1.0, type=float, help='soft label')
 parser.add_argument('--gbs', type=int, default=10, help='input batch size for evaluating gradient')
 parser.add_argument('--hbs', type=int, default=10, help='input batch size for evaluating hessian')
 parser.add_argument('--gpu', default=None, help='index of gpus to use')
-parser.add_argument('--ngpu', type=int, default=2, help='number of gpus to use')
+parser.add_argument('--ngpu', type=int, default=1, help='number of gpus to use')
 parser.add_argument('--model_root', default='~/.torch/models/', help='folder to save the model')
 parser.add_argument('--data_root', default='/tmp/public_dataset/pytorch/', help='folder to save the model')
 parser.add_argument('--input_size', type=int, default=224, help='input size of image')
@@ -45,6 +45,15 @@ parser.add_argument('--subsample_rate', default=1.0, type=float, help='subsample
 parser.add_argument('--compute_gradient', default=False, type=bool, help='compute gradient for retrained model')
 parser.add_argument('--compute_hessian', default=False, type=bool, help='compute hessian for retrained model')
 parser.add_argument('--temperature', default=1.0, type=float, help='temperature for model calibration')
+#Synthetic data arguments
+parser.add_argument('--input_dims', default=100, type=int, help='input dimension for synthetic model')
+parser.add_argument('--n_hidden', default='[50,20]', type=str, help='hidden layers for synthetic model')
+parser.add_argument('--output_dims', default=10, type=int, help='output dimension for synthetic model')
+parser.add_argument('--dropout_rate', default=0.2, type=float, help='dropout rate for synthetic model')
+parser.add_argument('--training_size', default=5000, type=int, help='training size for synthetic data')
+parser.add_argument('--val_size', default=1000, type=int, help='validation size for synthetic data')
+parser.add_argument('--input_std', default=1.0, type=float, help='standard deviation for input data')
+parser.add_argument('--noise_std', default=0.0, type=float, help='standard deviation for noise of outputdata')
 args = parser.parse_args()
 
 valid_layer_types = [nn.modules.conv.Conv2d, nn.modules.linear.Linear]
@@ -231,12 +240,23 @@ def train(train_ds, model, criterion, optimizer, epoch, is_imagenet):
 
     print('* Train epoch # %d    top1:  %.3f  top5:  %.3f' % (epoch, top1.avg, top5.avg))
 
-def eval_and_print(model, train_ds, val_ds, is_imagenet, prefix_str=""):
-    acc1_train, acc5_train, loss_train = misc.eval_model(model, train_ds, ngpu=args.ngpu, is_imagenet=is_imagenet)
-    acc1_val, acc5_val, loss_val = misc.eval_model(model, val_ds, ngpu=args.ngpu, is_imagenet=is_imagenet)
-    print(prefix_str+" model, type={}, training acc1={:.4f}, acc5={:.4f}, loss={:.6f}".format(args.type, acc1_train, acc5_train, loss_train))
-    print(prefix_str+" model, type={}, validation acc1={:.4f}, acc5={:.4f}, loss={:.6f}".format(args.type, acc1_val, acc5_val, loss_val))
-    return acc1_train, acc5_train, loss_train, acc1_val, acc5_val, loss_val
+def eval_and_print(model, ds, is_imagenet, is_train, prefix_str=""):
+    if is_train:
+        acc1, acc5, loss = misc.eval_model(model, ds, ngpu=args.ngpu, is_imagenet=is_imagenet)
+        print(prefix_str+" model, type={}, training acc1={:.4f}, acc5={:.4f}, loss={:.6f}".format(args.type, acc1, acc5, loss))
+    else:
+        acc1, acc5, loss = misc.eval_model(model, ds, ngpu=args.ngpu, is_imagenet=is_imagenet)
+        print(prefix_str+" model, type={}, validation acc1={:.4f}, acc5={:.4f}, loss={:.6f}".format(args.type, acc1, acc5, loss))
+    return acc1, acc5, loss
+
+def eval_and_print_regression(model, ds, is_train, prefix_str=""):
+    if is_train:
+        loss = misc.eval_regression_model(model, ds, ngpu=args.ngpu)
+        print(prefix_str+" model, type={}, training loss={:.6f}".format(args.type, loss))
+    else:
+        loss = misc.eval_regression_model(model, ds, ngpu=args.ngpu)
+        print(prefix_str+" model, type={}, validation loss={:.6f}".format(args.type, loss))
+    return loss
 
 def adjust_learning_rate(optimizer, epoch):
     lr = args.lr * (0.9 ** (epoch // (args.epoch // 4)))
@@ -267,7 +287,10 @@ def retrain(model, train_ds, val_ds, valid_ind, is_imagenet):
 
 def main():
     # load model and dataset fetcher
-    model_raw, ds_fetcher, is_imagenet = selector.select(args.type, model_root=args.model_root)
+    if args.type=='synthetic':
+        model_raw, ds_fetcher, is_imagenet = selector.select(args.type, model_root=args.model_root, input_dims=args.input_dims, n_hidden=eval(args.n_hidden), output_dims=args.output_dims, dropout=args.dropout_rate)
+    else:
+        model_raw, ds_fetcher, is_imagenet = selector.select(args.type, model_root=args.model_root)
     args.ngpu = args.ngpu if is_imagenet else 1
     training_size = 60000 if args.type=='mnist' else 50000
 
@@ -281,17 +304,26 @@ def main():
 
     for i in range(args.number_of_models):
         #get training dataset and validation dataset
-        if args.subsample_rate < 1.0:
-            indices = np.random.choice(training_size, int(args.subsample_rate*training_size/args.batch_size)*args.batch_size, replace=True)
-            train_ds = ds_fetcher(args.batch_size, data_root=args.data_root, val=False, subsample=True, indices=indices, input_size=args.input_size)
+        if args.type=='synthetic':
+            train_ds = ds_fetcher(args.batch_size, model_raw, args.training_size, args.input_dims, args.output_dims, args.input_std, args.noise_std)
+            val_ds = ds_fetcher(args.batch_size, model_raw, args.val_size, args.input_dims, args.output_dims, args.input_std, args.noise_std)
         else:
-            train_ds = ds_fetcher(args.batch_size, data_root=args.data_root, val=False, input_size=args.input_size)
-            indices = np.arange(training_size)
-        val_ds = ds_fetcher(args.batch_size, data_root=args.data_root, train=False, input_size=args.input_size)
-    
+            if args.subsample_rate < 1.0:
+                indices = np.random.choice(training_size, int(args.subsample_rate*training_size/args.batch_size)*args.batch_size, replace=True)
+                train_ds = ds_fetcher(args.batch_size, data_root=args.data_root, val=False, subsample=True, indices=indices, input_size=args.input_size)
+            else:
+                train_ds = ds_fetcher(args.batch_size, data_root=args.data_root, val=False, input_size=args.input_size)
+                indices = np.arange(training_size)
+            val_ds = ds_fetcher(args.batch_size, data_root=args.data_root, train=False, input_size=args.input_size)
+   
         # eval raw model
-        acc1_train, acc5_train, loss_train, acc1_val, acc5_val, loss_val = eval_and_print(model_raw, train_ds, val_ds, is_imagenet, prefix_str="Raw")
-    
+        if args.type=='synthetic':
+            loss_train = eval_and_print_regression(model_raw, train_ds, is_train=True, prefix_str="Raw")
+            loss_val = eval_and_print_regression(model_raw, val_ds, is_train=False, prefix_str="Raw")
+        else:
+            acc1_train, acc5_train, loss_train = eval_and_print(model_raw, train_ds, is_imagenet, is_train=True, prefix_str="Raw")
+            acc1_val, acc5_val, loss_val = eval_and_print(model_raw, val_ds, is_imagenet, is_train=False, prefix_str="Raw")
+    '''
         # retrain model
         retrain(model_raw, train_ds, val_ds, valid_ind, is_imagenet)
         acc1_train, acc5_train, loss_train, acc1_val, acc5_val, loss_val = eval_and_print(model_raw, train_ds, val_ds, is_imagenet, prefix_str="Retrained "+str(i+args.starting_index))
@@ -348,6 +380,6 @@ def main():
             with open(filepath, "wb") as f:
                 torch.save(weight_importance, f)
 
-
+'''
 if __name__ == '__main__':
     main()

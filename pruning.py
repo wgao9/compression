@@ -97,8 +97,8 @@ def prune(model, weight_importance, weight_hessian, valid_ind, ratios, is_imagen
 def get_importance(importance_type, t=1.0):
     #load file
     filename = args.type+"_"+importance_type
-    if args.loss != 'cross_entropy' and importance_type in ['gradient', 'hessian']:
-        filename += "_"+args.loss
+    #if args.loss != 'cross_entropy' and importance_type in ['gradient', 'hessian']:
+    #    filename += "_"+args.loss
     if t > 1.0:
         filename += "_t="+str(int(t))
     filename += ".pth"
@@ -260,8 +260,10 @@ def main():
                 weight_importance[ix] = weight_importance[ix] + args.mu*weight_importance_id[ix]
         elif args.mode == 'gradient':
             weight_importance = get_importance(importance_type='gradient', t=args.temperature)
+        elif args.mode == 'KL':
+            weight_importance = get_importance(importance_type='KL', t=args.temperature)
         #get weight hessian
-        if args.type in ['mnist', 'cifar10']:
+        if args.type in ['mnist', 'cifar10'] and args.mode != 'KL':
             weight_hessian = get_importance(importance_type='hessian', t=args.temperature)
             weight_hessian_id = get_importance(importance_type='normal')
             for ix in weight_hessian:
