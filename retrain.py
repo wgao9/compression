@@ -22,11 +22,9 @@ from utils.hessian_utils import *
 import time
 parser = argparse.ArgumentParser(description='Retrain model with fewer samples')
 parser.add_argument('--type', default='cifar10', help='|'.join(selector.known_models))
-parser.add_argument('--batch_size', type=int, default=100, help='input batch size for training')
-parser.add_argument('--loss', default='cross_entropy', help='loss function used for computing importance')
-parser.add_argument('--soft', default=1.0, type=float, help='soft label')
-parser.add_argument('--gbs', type=int, default=10, help='input batch size for evaluating gradient')
-parser.add_argument('--hbs', type=int, default=10, help='input batch size for evaluating hessian')
+parser.add_argument('--batch_size', type=int, default=10, help='input batch size for training')
+parser.add_argument('--gbs', type=int, default=1, help='input batch size for evaluating gradient')
+parser.add_argument('--hbs', type=int, default=1, help='input batch size for evaluating hessian')
 parser.add_argument('--gpu', default=None, help='index of gpus to use')
 parser.add_argument('--ngpu', type=int, default=1, help='number of gpus to use')
 parser.add_argument('--model_root', default='~/.torch/models/', help='folder to save the model')
@@ -40,7 +38,7 @@ parser.add_argument('--number_of_models', default=20, type=int, help='number of 
 parser.add_argument('--starting_index', default=0, type=int, help='start index for naming models')
 parser.add_argument('--lr', default=1e-2, type=float, help='learning rate for retrain')
 parser.add_argument('--epoch', default=25, type=int, help='num of epochs for retrain')
-parser.add_argument('--eval_epoch', default=25, type=int, help='evaluate performance per how many epochs')
+parser.add_argument('--eval_epoch', default=100, type=int, help='evaluate performance per how many epochs')
 parser.add_argument('--subsample_rate', default=1.0, type=float, help='subsample_rate for retrain')
 parser.add_argument('--compute_gradient', default=False, type=bool, help='compute gradient for retrained model')
 parser.add_argument('--compute_hessian', default=False, type=bool, help='compute hessian for retrained model')
@@ -50,8 +48,8 @@ parser.add_argument('--input_dims', default=100, type=int, help='input dimension
 parser.add_argument('--n_hidden', default='[50,20]', type=str, help='hidden layers for synthetic model')
 parser.add_argument('--output_dims', default=10, type=int, help='output dimension for synthetic model')
 parser.add_argument('--dropout_rate', default=0.2, type=float, help='dropout rate for synthetic model')
-parser.add_argument('--training_size', default=5000, type=int, help='training size for synthetic data')
-parser.add_argument('--val_size', default=1000, type=int, help='validation size for synthetic data')
+parser.add_argument('--training_size', default=50, type=int, help='training size for synthetic data')
+parser.add_argument('--val_size', default=50, type=int, help='validation size for synthetic data')
 parser.add_argument('--input_std', default=1.0, type=float, help='standard deviation for input data')
 parser.add_argument('--noise_std', default=0.0, type=float, help='standard deviation for noise of outputdata')
 args = parser.parse_args()
@@ -67,14 +65,10 @@ def get_all_one_importance(model, valid_ind, is_imagenet):
     return importances
 
 def get_gradient_importance(model, ds_for_importance, valid_ind, is_imagenet):
-    if args.loss in ['mse','MSE']:
+    if args.type == 'synthetic':
         criterion = nn.MSELoss()
-    elif 'soft' in args.loss:
-        criterion = nn.KLDivLoss()
     else:
         criterion = nn.CrossEntropyLoss()
-    sm = nn.Softmax(dim=1)
-    lsm = nn.LogSoftmax(dim=1)
 
     m_list = list(model.modules())
     importances = {}
@@ -90,17 +84,6 @@ def get_gradient_importance(model, ds_for_importance, valid_ind, is_imagenet):
         if is_imagenet:
             input = torch.from_numpy(input)
             target = torch.from_numpy(target)
-
-        if args.loss in ['mse', 'MSE']:
-            target_onehot = torch.zeros(args.batch_size, 10).scatter_(1, torch.LongTensor(target.view(args.batch_size, 1)), 1)
-            target_onehot = target_onehot.cuda(async=True)
-            target_onehot_var = torch.autograd.Variable(target_onehot).cuda()
-        elif 'soft' in args.loss:
-            target_onehot = torch.zeros(args.batch_size, 10).scatter_(1, torch.LongTensor(target.view(args.batch_size, 1)), 1)
-            target_soft = ((1-args.soft)/10)*torch.ones(args.batch_size, 10) +args.soft*target_onehot
-            target_soft = target_soft.cuda(async=True)
-            target_soft_var = torch.autograd.Variable(target_soft).cuda()
-
         target = target.cuda(async=True)
         input_var = torch.autograd.Variable(input).cuda()
         target_var = torch.autograd.Variable(target).cuda()
@@ -108,12 +91,9 @@ def get_gradient_importance(model, ds_for_importance, valid_ind, is_imagenet):
         if 'inception' in args.type:
             output, aux_output = model(input_var)
             loss = criterion(output / args.temperature, target_var) + criterion(aux_output / args.temperature, target_var)
-        elif args.loss in ['mse', 'MSE']:
+        elif args.type == 'synthetic':
             output = model(input_var)
-            loss = criterion(sm(output / args.temperature), target_onehot_var)
-        elif 'soft' in args.loss:
-            output = model(input_var)
-            loss = criterion(lsm(output / args.temperature), target_soft_var)
+            loss = criterion(output, target_var)
         else:
             output = model(input_var)
             loss = criterion(output / args.temperature, target_var)
@@ -126,18 +106,14 @@ def get_gradient_importance(model, ds_for_importance, valid_ind, is_imagenet):
 
     for ix in valid_ind:
         importances[ix] = importances[ix] / importances[ix].mean()
-        
+
     return importances
 
 def get_hessian_importance(model, ds_for_importance, valid_ind, is_imagenet):
-    if args.loss in ['mse','MSE']:
+    if args.type == 'synthetic':
         criterion = nn.MSELoss()
-    elif 'soft' in args.loss:
-        criterion = nn.KLDivLoss()
     else:
         criterion = nn.CrossEntropyLoss()
-    sm = nn.Softmax(dim=1)
-    lsm = nn.LogSoftmax(dim=1)
 
     m_list = list(model.modules())
     importances = {}
@@ -154,16 +130,6 @@ def get_hessian_importance(model, ds_for_importance, valid_ind, is_imagenet):
             input = torch.from_numpy(input)
             target = torch.from_numpy(target)
 
-        if args.loss in ['mse', 'MSE']:
-            target_onehot = torch.zeros(args.batch_size, 10).scatter_(1, torch.LongTensor(target.view(args.batch_size, 1)), 1)
-            target_onehot = target_onehot.cuda(async=True)
-            target_onehot_var = torch.autograd.Variable(target_onehot).cuda()
-        elif 'soft' in args.loss:
-            target_onehot = torch.zeros(args.batch_size, 10).scatter_(1, torch.LongTensor(target.view(args.batch_size, 1)), 1)
-            target_soft = ((1-args.soft)/10)*torch.ones(args.batch_size, 10) +args.soft*target_onehot
-            target_soft = target_soft.cuda(async=True)
-            target_soft_var = torch.autograd.Variable(target_soft).cuda()
-
         target = target.cuda(async=True)
         input_var = torch.autograd.Variable(input).cuda()
         target_var = torch.autograd.Variable(target).cuda()
@@ -171,12 +137,9 @@ def get_hessian_importance(model, ds_for_importance, valid_ind, is_imagenet):
         if 'inception' in args.type:
             output, aux_output = model(input_var)
             loss = (criterion(output / args.temperature, target_var) + criterion(aux_output / args.temperature, target_var))**2
-        elif args.loss in ['mse', 'MSE']:
+        elif args.type == 'synthetic':
             output = model(input_var)
-            loss = criterion(sm(output / args.temperature), target_onehot_var)**2
-        elif 'soft' in args.loss:
-            output = model(input_var)
-            loss = criterion(lsm(output / args.temperature), target_soft_var)**2
+            loss = criterion(output, target_var)**2
         else:
             output = model(input_var)
             loss = criterion(output / args.temperature, target_var)**2
@@ -224,10 +187,10 @@ def train(train_ds, model, criterion, optimizer, epoch, is_imagenet):
             loss = criterion(output, target_var)
 
         # measure accuracy and record loss
-        prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
-        losses.update(loss.item(), input.size(0))
-        top1.update(prec1.item(), input.size(0))
-        top5.update(prec5.item(), input.size(0))
+        #prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
+        #losses.update(loss.item(), input.size(0))
+        #top1.update(prec1.item(), input.size(0))
+        #top5.update(prec5.item(), input.size(0))
 
         # compute gradient
         optimizer.zero_grad()
@@ -238,7 +201,7 @@ def train(train_ds, model, criterion, optimizer, epoch, is_imagenet):
         batch_time.update(time.time() - end)
         end = time.time()
 
-    print('* Train epoch # %d    top1:  %.3f  top5:  %.3f' % (epoch, top1.avg, top5.avg))
+    #print('* Train epoch # %d    top1:  %.3f  top5:  %.3f' % (epoch, top1.avg, top5.avg))
 
 def eval_and_print(model, ds, is_imagenet, is_train, prefix_str=""):
     if is_train:
@@ -269,9 +232,12 @@ def retrain(model, train_ds, val_ds, valid_ind, is_imagenet):
         if i in valid_ind:
             torch.nn.init.xavier_normal_(m.weight)
 
-    best_acc, best_acc5, best_loss = misc.eval_model(model, val_ds, ngpu=args.ngpu, is_imagenet=is_imagenet)
-    best_model = model
-    criterion = nn.CrossEntropyLoss()
+    #best_acc, best_acc5, best_loss = misc.eval_model(model, val_ds, ngpu=args.ngpu, is_imagenet=is_imagenet)
+    #best_model = model
+    if args.type == 'synthetic':
+        criterion = nn.MSELoss()
+    else:
+        criterion = nn.CrossEntropyLoss()
 
     if 'inception' in args.type or args.optimizer == 'rmsprop':
         optimizer = torch.optim.RMSprop(model.parameters(), args.lr, alpha=0.9, eps=1.0, momentum=0.9)
@@ -282,7 +248,12 @@ def retrain(model, train_ds, val_ds, valid_ind, is_imagenet):
         #adjust_learning_rate(optimizer, epoch)
         train(train_ds, model, criterion, optimizer, epoch, is_imagenet)
         if (epoch+1)%args.eval_epoch == 0: 
-            acc1_train, acc5_train, loss_train, acc1_val, acc5_val, loss_val = eval_and_print(model, train_ds, val_ds, is_imagenet, prefix_str="retraining epoch {}".format(epoch+1))
+            if args.type=='synthetic':
+                loss_train = eval_and_print_regression(model, train_ds, is_train=True, prefix_str="Retrain epoch {}".format(epoch+1))
+                loss_val = eval_and_print_regression(model, val_ds, is_train=False, prefix_str="Retrain epoch {}".format(epoch+1))
+            else:
+                acc1_train, acc5_train, loss_train = eval_and_print(model, train_ds, is_imagenet, is_train=True, prefix_str="Retrain epoch {}".format(epoch+1))
+                acc1_val, acc5_val, loss_val = eval_and_print(model, val_ds, is_imagenet, is_train=False, prefix_str="Retrain epoch {}".format(epoch+1))
 
 
 def main():
@@ -302,11 +273,12 @@ def main():
             valid_ind.append(i)
             layer_type_list.append(type(layer))
 
+    metrics = np.zeros((6, args.number_of_models))
     for i in range(args.number_of_models):
         #get training dataset and validation dataset
         if args.type=='synthetic':
-            train_ds = ds_fetcher(args.batch_size, model_raw, args.training_size, args.input_dims, args.output_dims, args.input_std, args.noise_std)
-            val_ds = ds_fetcher(args.batch_size, model_raw, args.val_size, args.input_dims, args.output_dims, args.input_std, args.noise_std)
+            train_ds = ds_fetcher(args.batch_size, renew=True, save=True, name='train_'+str(i+args.starting_index), model=model_raw, size=args.training_size, input_dims=args.input_dims, n_hidden=args.n_hidden, output_dims=args.output_dims, input_std=args.input_std, noise_std=args.noise_std)
+            val_ds = ds_fetcher(args.batch_size, renew=True, save=True, name='val_'+str(i+args.starting_index), model=model_raw, size=args.val_size, input_dims=args.input_dims, n_hidden=args.n_hidden, output_dims=args.output_dims, input_std=args.input_std, noise_std=args.noise_std)
         else:
             if args.subsample_rate < 1.0:
                 indices = np.random.choice(training_size, int(args.subsample_rate*training_size/args.batch_size)*args.batch_size, replace=True)
@@ -315,7 +287,7 @@ def main():
                 train_ds = ds_fetcher(args.batch_size, data_root=args.data_root, val=False, input_size=args.input_size)
                 indices = np.arange(training_size)
             val_ds = ds_fetcher(args.batch_size, data_root=args.data_root, train=False, input_size=args.input_size)
-   
+
         # eval raw model
         if args.type=='synthetic':
             loss_train = eval_and_print_regression(model_raw, train_ds, is_train=True, prefix_str="Raw")
@@ -323,24 +295,43 @@ def main():
         else:
             acc1_train, acc5_train, loss_train = eval_and_print(model_raw, train_ds, is_imagenet, is_train=True, prefix_str="Raw")
             acc1_val, acc5_val, loss_val = eval_and_print(model_raw, val_ds, is_imagenet, is_train=False, prefix_str="Raw")
-    '''
+   
         # retrain model
         retrain(model_raw, train_ds, val_ds, valid_ind, is_imagenet)
-        acc1_train, acc5_train, loss_train, acc1_val, acc5_val, loss_val = eval_and_print(model_raw, train_ds, val_ds, is_imagenet, prefix_str="Retrained "+str(i+args.starting_index))
+        if args.type=='synthetic':
+            metrics[2,i] = eval_and_print_regression(model_raw, train_ds, is_train=True, prefix_str="Retrained {}".format(i+args.starting_index))
+            metrics[5,i] = eval_and_print_regression(model_raw, val_ds, is_train=False, prefix_str="Retrained {}".format(i+args.starting_index))
+        else:
+            metrics[0,i], metrics[1,i], metrics[2,i] = eval_and_print(model_raw, train_ds, is_imagenet, is_train=True, prefix_str="Retrained {}".format(i+args.starting_index))
+            metrics[3,i], metrics[4,i], metrics[5,i] = eval_and_print(model_raw, val_ds, is_imagenet, is_train=False, prefix_str="Retrained {}".format(i+args.starting_index))
 
         #save retrained model
         filename = args.type+"_model_"+str(i+args.starting_index)+".pth.tar"
-        pathname = args.save_root+args.type+"/ssr="+str(int(args.subsample_rate*1000))
-        if not os.path.exists(pathname):
-            os.makedirs(pathname)
-        filepath = os.path.join(pathname, filename)
+        pathname = args.save_root+args.type
+        if args.subsample_rate < 1.0:
+            pathname += "/ssr="+str(int(args.subsample_rate*1000))
+        if args.type == 'synthetic':
+            pathname += "_"+str(args.input_dims)
+            for dims in eval(args.n_hidden):
+                pathname += "_"+str(dims)
+            pathname += "_"+str(args.output_dims)
+            pathname_model = pathname+"/model"
+        if not os.path.exists(pathname_model):
+            os.makedirs(pathname_model)
+        filepath = os.path.join(pathname_model, filename)
         with open(filepath, "wb") as f:
-            torch.save({
-                'number': i,
-                'subsample_rate': args.subsample_rate,
-                'ds_indices': indices,
-                'model_state_dict': model_raw.state_dict(),
-                }, f)
+            if args.type == 'synthetic':
+                torch.save({
+                    'number': i,
+                    'model_state_dict': model_raw.state_dict(),
+                    }, f)
+            else:
+                torch.save({
+                    'number': i,
+                    'subsample_rate': args.subsample_rate,
+                    'ds_indices': indices,
+                    'model_state_dict': model_raw.state_dict(),
+                    }, f)
 
         #compute importance and write to file
         weight_importance = get_all_one_importance(model_raw, valid_ind, is_imagenet)
@@ -348,38 +339,55 @@ def main():
         if args.temperature > 1.0:
             filename += "_t="+str(int(args.temperature))
         filename += ".pth"
-        filepath = os.path.join(pathname, filename)
+        pathname_importances = pathname+"/importances"
+        if not os.path.exists(pathname_importances):
+            os.makedirs(pathname_importances)
+        filepath = os.path.join(pathname_importances, filename)
         with open(filepath, "wb") as f:
             torch.save(weight_importance, f)
 
         if args.compute_gradient:
             #compute importance and write to file
-            ds_for_importance = ds_fetcher(args.gbs, data_root=args.data_root, val=False, subsample=True, indices=indices, input_size=args.input_size)
+            if args.type == 'synthetic':
+                ds_for_importance = ds_fetcher(args.gbs, renew=False, name='train_'+str(i+args.starting_index), input_dims=args.input_dims, n_hidden=args.n_hidden, output_dims=args.output_dims)
+            else:
+                ds_for_importance = ds_fetcher(args.gbs, data_root=args.data_root, val=False, subsample=True, indices=indices, input_size=args.input_size)
             weight_importance = get_gradient_importance(model_raw, ds_for_importance, valid_ind, is_imagenet)
+
             filename = args.type+"_gradient_"+str(i+args.starting_index)
-            if args.loss != 'cross_entropy':
-                filename += "_"+args.loss
             if args.temperature > 1.0:
                 filename += "_t="+str(int(args.temperature))
             filename += ".pth"
-            filepath = os.path.join(pathname, filename)
+            filepath = os.path.join(pathname_importances, filename)
             with open(filepath, "wb") as f:
                 torch.save(weight_importance, f)
 
         if args.compute_hessian:
             #compute importance and write to file
-            ds_for_hessian = ds_fetcher(args.hbs, data_root=args.data_root, val=False, subsample=True, indices=indices, input_size=args.input_size)
+            if args.type == 'synthetic':
+                ds_for_hessian = ds_fetcher(args.hbs, renew=False, name='train_'+str(i+args.starting_index), input_dims=args.input_dims, n_hidden=args.n_hidden, output_dims=args.output_dims)
+            else:
+                ds_for_hessian = ds_fetcher(args.hbs, data_root=args.data_root, val=False, subsample=True, indices=indices, input_size=args.input_size)
             weight_importance = get_hessian_importance(model_raw, ds_for_hessian, valid_ind, is_imagenet)
+
             filename = args.type+"_hessian_"+str(i+args.starting_index)
-            if args.loss != 'cross_entropy':
-                filename += "_"+args.loss
             if args.temperature > 1.0:
                 filename += "_t="+str(int(args.temperature))
             filename += ".pth"
-            filepath = os.path.join(pathname, filename)
+            filepath = os.path.join(pathname_importances, filename)
             with open(filepath, "wb") as f:
                 torch.save(weight_importance, f)
 
-'''
+
+    perf_inf = ""
+    if args.type == 'synthetic':
+        perf_inf += "After retraining, type={}, training loss={:.6f}+-{:.6f} \n".format(args.type, np.mean(metrics[2]), np.std(metrics[2]))
+        perf_inf += "After retraining, type={}, validation loss={:.6f}+-{:.6f} \n".format(args.type, np.mean(metrics[5]), np.std(metrics[5]))
+    else:
+        perf_inf += "After retraining, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}\n ".format(args.type, np.mean(metrics[0]), np.std(metrics[0]), np.mean(metrics[1]), np.std(metrics[1]), np.mean(metrics[2]), np.std(metrics[2]))
+        perf_inf += "After retraining, type={}, validation acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}\n".format(args.type, np.mean(metrics[3]), np.std(metrics[3]), np.mean(metrics[4]), np.std(metrics[4]), np.mean(metrics[5]), np.std(metrics[5]))
+        
+    print(perf_inf)
+
 if __name__ == '__main__':
     main()

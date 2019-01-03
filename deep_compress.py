@@ -28,7 +28,7 @@ if module_path not in sys.path:
 
 parser = argparse.ArgumentParser(description='PyTorch SVHN Example')
 parser.add_argument('--type', default='cifar10', help='|'.join(selector.known_models))
-parser.add_argument('--batch_size', type=int, default=100, help='input batch size for training')
+parser.add_argument('--batch_size', type=int, default=10, help='input batch size for training')
 parser.add_argument('--gpu', default=None, help='index of gpus to use')
 parser.add_argument('--ngpu', type=int, default=2, help='number of gpus to use')
 parser.add_argument('--seed', type=int, default=117, help='random seed (default: 1)')
@@ -56,10 +56,15 @@ parser.add_argument('--quant_finetune_epoch', default=12, type=int, help='num of
 parser.add_argument('--is_pruned', default=False, type=bool, help='Is pruned model or not?')
 #Retrain argument
 parser.add_argument('--number_of_models', default=5, type=int, help='number of models to use')
-parser.add_argument('--subsample_rate', default=0.05, type=float, help='subsampling rate')
+parser.add_argument('--subsample_rate', default=1.0, type=float, help='subsampling rate')
 parser.add_argument('--save_root', default='sub_models/', type=str, help='folder for retrained models')
 parser.add_argument('--result_root', default=None, type=str, help='folder to store results')
 parser.add_argument('--result_name', default='', type=str, help='folder to store results')
+#Synthetic data arguments
+parser.add_argument('--input_dims', default=100, type=int, help='input dimension for synthetic model')
+parser.add_argument('--n_hidden', default='[50,20]', type=str, help='hidden layers for synthetic model')
+parser.add_argument('--output_dims', default=10, type=int, help='output dimension for synthetic model')
+parser.add_argument('--dropout_rate', default=0.2, type=float, help='dropout rate for synthetic model')
 args = parser.parse_args()
 
 args.gpu = misc.auto_select_gpu(utility_bound=0, num_gpu=args.ngpu, selected_gpus=args.gpu)
@@ -102,12 +107,18 @@ def quantize(model, weight_importance, weight_hessian, valid_ind, n_clusters, is
 def get_importance(importance_type, index, t=1.0):
     #load file
     filename = args.type+"_"+importance_type+"_"+str(index)
-    if args.loss != 'cross_entropy' and importance_type in ['gradient', 'hessian']:
-        filename += "_"+args.loss
     if args.temperature > 1.0:
         filename += "_t="+str(int(args.temperature))
     filename += ".pth"
-    pathname = args.save_root+args.type+"/ssr="+str(int(args.subsample_rate*1000))
+    pathname = args.save_root+args.type
+    if args.subsample_rate < 1.0:
+        pathname += "/ssr="+str(int(args.subsample_rate*1000))
+    if args.type == 'synthetic':
+        pathname += "_"+str(args.input_dims)
+        for dims in eval(args.n_hidden):
+            pathname += "_"+str(dims)
+        pathname += "_"+str(args.output_dims)
+        pathname += "/importances"
     filepath = os.path.join(pathname, filename)
 
     assert os.path.isfile(filepath), "Please check "+filepath+" exists"
@@ -146,10 +157,10 @@ def train(train_ds, model, criterion, optimizer, epoch, valid_ind, mask_list, is
             loss = criterion(output, target_var)
 
         # measure accuracy and record loss
-        prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
+        #prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
         losses.update(loss.item(), input.size(0))
-        top1.update(prec1.item(), input.size(0))
-        top5.update(prec5.item(), input.size(0))
+        #top1.update(prec1.item(), input.size(0))
+        #top5.update(prec5.item(), input.size(0))
 
         # compute gradient
         optimizer.zero_grad()
@@ -168,7 +179,7 @@ def train(train_ds, model, criterion, optimizer, epoch, valid_ind, mask_list, is
         #progress_bar(i, len(train_ds), 'Loss: %.3f | Acc1: %.3f%% | Acc5: %.3f%%'
         #             % (losses.avg, top1.avg, top5.avg))
 
-    print('* Train epoch # %d    top1:  %.3f  top5:  %.3f' % (epoch, top1.avg, top5.avg))
+   # print('* Train epoch # %d    top1:  %.3f  top5:  %.3f' % (epoch, top1.avg, top5.avg))
 
 
 def mask_gradient(model, valid_ind, mask_list):
@@ -193,7 +204,10 @@ def adjust_learning_rate(optimizer, epoch):
 
 def finetune(model, centroid_label_dict, train_ds, val_ds, valid_ind, is_imagenet):
     # fine-tune to preserve accuracy
-    criterion = nn.CrossEntropyLoss().cuda()
+    if args.type == 'synthetic':
+        criterion = nn.MSELoss().cuda()
+    else:
+        criterion = nn.CrossEntropyLoss().cuda()
 
     if args.fast_grad:
         # to speed up training, save the index tensor first
@@ -224,9 +238,21 @@ def eval_and_print(model, ds, is_imagenet, is_train,  prefix_str=""):
         print(prefix_str+" model, type={}, validation acc1={:.4f}, acc5={:.4f}, loss={:.6f}".format(args.type, acc1, acc5, loss))
     return acc1, acc5, loss
 
+def eval_and_print_regression(model, ds, is_train, prefix_str=""):
+    if is_train:
+        loss = misc.eval_regression_model(model, ds, ngpu=args.ngpu)
+        print(prefix_str+" model, type={}, training loss={:.6f}".format(args.type, loss))
+    else:
+        loss = misc.eval_regression_model(model, ds, ngpu=args.ngpu)
+        print(prefix_str+" model, type={}, validation loss={:.6f}".format(args.type, loss))
+    return loss
+
 def main():
     # load model and dataset fetcher
-    model_raw, ds_fetcher, is_imagenet = selector.select(args.type, model_root=args.model_root)
+    if args.type=='synthetic':
+        model_raw, ds_fetcher, is_imagenet = selector.select(args.type, model_root=args.model_root, input_dims=args.input_dims, n_hidden=eval(args.n_hidden), output_dims=args.output_dims, dropout=args.dropout_rate)
+    else:
+        model_raw, ds_fetcher, is_imagenet = selector.select(args.type, model_root=args.model_root)
     args.ngpu = args.ngpu if is_imagenet else 1
 
     # get valid layers
@@ -251,7 +277,15 @@ def main():
     for i in range(args.number_of_models):
         #load retrained model
         filename = args.type+"_model_"+str(i)+".pth.tar"
-        pathname = args.save_root+args.type+"/ssr="+str(int(args.subsample_rate*1000))
+        pathname = args.save_root+args.type
+        if args.subsample_rate < 1.0:
+            pathname += "/ssr="+str(int(args.subsample_rate*1000))
+        if args.type == 'synthetic':
+            pathname += "_"+str(args.input_dims)
+            for dims in eval(args.n_hidden):
+                pathname += "_"+str(dims)
+            pathname += "_"+str(args.output_dims)
+            pathname += "/model"
         filepath = os.path.join(pathname, filename)
         assert os.path.isfile(filepath), "Can not find model"
 
@@ -259,11 +293,16 @@ def main():
             print("Loading model parameters from"+filepath)
             checkpoint = torch.load(f)
             model_raw.load_state_dict(checkpoint['model_state_dict'])
-            ds_indices = checkpoint['ds_indices']
+            if args.type != 'synthetic':
+               ds_indices = checkpoint['ds_indices']
 
         #get training dataset and validation dataset
-        train_ds = ds_fetcher(args.batch_size, data_root=args.data_root, val=False, subsample=True, indices=ds_indices, input_size=args.input_size)
-        val_ds = ds_fetcher(args.batch_size, data_root=args.data_root, train=False, input_size=args.input_size)
+        if args.type == 'synthetic':
+            train_ds = ds_fetcher(args.batch_size, renew=False, name='train_'+str(i), input_dims=args.input_dims, n_hidden=args.n_hidden, output_dims=args.output_dims)
+            val_ds = ds_fetcher(args.batch_size, renew=False, name='val_'+str(i), input_dims=args.input_dims, n_hidden=args.n_hidden, output_dims=args.output_dims)
+        else:
+            train_ds = ds_fetcher(args.batch_size, data_root=args.data_root, val=False, subsample=True, indices=ds_indices, input_size=args.input_size)
+            val_ds = ds_fetcher(args.batch_size, data_root=args.data_root, train=False, input_size=args.input_size)
     
         #get weight importance
         if args.mode == 'normal':
@@ -275,6 +314,9 @@ def main():
                 weight_importance[ix] = weight_importance[ix] + args.mu*weight_importance_id[ix]
         elif args.mode == 'gradient':
             weight_importance = get_importance('gradient', i, t=args.temperature)
+            weight_importance_id = get_importance('normal', i)
+            for ix in weight_importance:
+                weight_importance[ix] = weight_importance[ix] + args.mu*weight_importance_id[ix]
         if args.type in ['mnist', 'cifar10']:
             #get weight hessian
             weight_hessian = get_importance('hessian', i, t=args.temperature)
@@ -286,37 +328,59 @@ def main():
             weight_hessian = get_importance('normal', i)
 
         # eval raw model
-        if not is_imagenet:
+
+        if args.type == 'synthetic':
+            metrics[3,i] = eval_and_print_regression(model_raw, train_ds, is_train=True, prefix_str="Retrained model number %d"%i)
+            metrics[6,i] = eval_and_print_regression(model_raw, val_ds, is_train=False, prefix_str="Retrained model number %d"%i)
+        else:
             metrics[1,i], metrics[2,i], metrics[3,i] = eval_and_print(model_raw, train_ds, is_imagenet, is_train=True, prefix_str = "Retrained model number %d"%i) 
-        metrics[4,i], metrics[5,i], metrics[6,i] = eval_and_print(model_raw, val_ds, is_imagenet, is_train=False, prefix_str="Retrained model number %d"%i)
+            metrics[4,i], metrics[5,i], metrics[6,i] = eval_and_print(model_raw, val_ds, is_imagenet, is_train=False, prefix_str="Retrained model number %d"%i)
 
         #quantize
         metrics[0,i], cl_list = quantize(model_raw, weight_importance, weight_hessian, valid_ind, clusters, is_imagenet)
         #print("Quantization, ratio={:.4f}".format(metrics[0,i]))
-        if not is_imagenet:
+        if args.type=='synthetic':
+            metrics[9,i] = eval_and_print_regression(model_raw, train_ds, is_train=True, prefix_str="After quantization number %d"%i)
+            metrics[12,i] = eval_and_print_regression(model_raw, val_ds, is_train=False, prefix_str="After quantization number %d"%i)
+        else:
             metrics[7,i], metrics[8,i], metrics[9,i] = eval_and_print(model_raw, train_ds, is_imagenet, is_train=True, prefix_str="After quantization number %d"%i)
-        metrics[10,i], metrics[11,i], metrics[12,i] = eval_and_print(model_raw, val_ds, is_imagenet, is_train=False, prefix_str="After quantization number %d"%i)
+            metrics[10,i], metrics[11,i], metrics[12,i] = eval_and_print(model_raw, val_ds, is_imagenet, is_train=False, prefix_str="After quantization number %d"%i)
 
         if args.quant_finetune:
             finetune(model_raw, cl_list, train_ds, val_ds, valid_ind, is_imagenet)
             #print("Quantization and finetune, ratio={:.4f}".format(metrics[0,i]))
-            if not is_imagenet:
+            if args.type=='synthetic':
+                metrics[15,i] = eval_and_print_regression(model_raw, train_ds, is_train=True, prefix_str="After finetune number %d"%i)
+                metrics[18,i] = eval_and_print_regression(model_raw, val_ds, is_train=False, prefix_str="After finetune number %d"%i)
+            else:
                 metrics[13,i], metrics[14,i], metrics[15,i] = eval_and_print(model_raw, train_ds, is_imagenet, is_train=True, prefix_str="After finetune number %d"%i)
-            metrics[16,i], metrics[17,i], metrics[18,i] = eval_and_print(model_raw, val_ds, is_imagenet, is_train=False, prefix_str="After finetune number %d"%i)
+                metrics[16,i], metrics[17,i], metrics[18,i] = eval_and_print(model_raw, val_ds, is_imagenet, is_train=False, prefix_str="After finetune number %d"%i)
 
-    #print average performance
-    if not is_imagenet:
-        print("Before quantization, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}".format(args.type, np.mean(metrics[1]), np.std(metrics[1]), np.mean(metrics[2]), np.std(metrics[2]), np.mean(metrics[3]), np.std(metrics[3])))
-    print("Before quantization, type={}, validation acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}".format(args.type, np.mean(metrics[4]), np.std(metrics[4]), np.mean(metrics[5]), np.std(metrics[5]), np.mean(metrics[6]), np.std(metrics[6])))
-    print("Compression ratio = {:.4f}+-{:.4f}".format(np.mean(metrics[0]), np.std(metrics[0])))
-    if not is_imagenet:
-        print("After quantization, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}".format(args.type, np.mean(metrics[7]), np.std(metrics[7]), np.mean(metrics[8]), np.std(metrics[8]), np.mean(metrics[9]), np.std(metrics[9])))
-    print("After quantization, type={}, validation acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}".format(args.type, np.mean(metrics[10]), np.std(metrics[10]), np.mean(metrics[11]), np.std(metrics[11]), np.mean(metrics[12]), np.std(metrics[12])))
-    if args.quant_finetune:
-        if not is_imagenet:
-            print("After finetune, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}".format(args.type, np.mean(metrics[13]), np.std(metrics[13]), np.mean(metrics[14]), np.std(metrics[14]), np.mean(metrics[15]), np.std(metrics[15])))
-        print("After finetune, type={}, validation acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}".format(args.type, np.mean(metrics[16]), np.std(metrics[16]), np.mean(metrics[17]), np.std(metrics[17]), np.mean(metrics[18]), np.std(metrics[18])))
+    #print average performance information
+    perf_inf = "\n"
+    for arg in sys.argv:
+        perf_inf += arg+" "
+    perf_inf += "\n \n"
+    if args.type == 'synthetic':
+        perf_inf += "Before quantization, type={}, training loss={:.6f}+-{:.6f} \n".format(args.type, np.mean(metrics[3]), np.std(metrics[3]))
+        perf_inf += "Before quantization, type={}, validation loss={:.6f}+-{:.6f} \n".format(args.type, np.mean(metrics[6]), np.std(metrics[6]))
+        perf_inf += "Compression ratio = {:.4f}+-{:.4f} \n".format(np.mean(metrics[0]), np.std(metrics[0]))
+        perf_inf += "After quantization, type={}, training loss={:.6f}+-{:.6f} \n".format(args.type, np.mean(metrics[9]), np.std(metrics[9]))
+        perf_inf += "After quantization, type={}, validation loss={:.6f}+-{:.6f} \n".format(args.type, np.mean(metrics[12]), np.std(metrics[12]))
+        if args.quant_finetune:
+            perf_inf += "After finetune, type={}, training loss={:.6f}+-{:.6f} \n".format(args.type, np.mean(metrics[15]), np.std(metrics[15]))
+            perf_inf += "After finetune, type={}, loss={:.6f}+-{:.6f} \n".format(args.type, np.mean(metrics[18]), np.std(metrics[18]))
+    else:
+        perf_inf += "Before quantization, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}\n ".format(args.type, np.mean(metrics[1]), np.std(metrics[1]), np.mean(metrics[2]), np.std(metrics[2]), np.mean(metrics[3]), np.std(metrics[3]))
+        perf_inf += "Before quantization, type={}, validation acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}\n".format(args.type, np.mean(metrics[4]), np.std(metrics[4]), np.mean(metrics[5]), np.std(metrics[5]), np.mean(metrics[6]), np.std(metrics[6]))
+        perf_inf += "Compression ratio = {:.4f}+-{:.4f}\n".format(np.mean(metrics[0]), np.std(metrics[0]))
+        perf_inf += "After quantization, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f} \n".format(args.type, np.mean(metrics[7]), np.std(metrics[7]), np.mean(metrics[8]), np.std(metrics[8]), np.mean(metrics[9]), np.std(metrics[9]))
+        perf_inf += "After quantization, type={}, validation acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}\n".format(args.type, np.mean(metrics[10]), np.std(metrics[10]), np.mean(metrics[11]), np.std(metrics[11]), np.mean(metrics[12]), np.std(metrics[12]))
+        if args.quant_finetune:
+            perf_inf += "After finetune, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}\n ".format(args.type, np.mean(metrics[13]), np.std(metrics[13]), np.mean(metrics[14]), np.std(metrics[14]), np.mean(metrics[15]), np.std(metrics[15]))
+            perf_inf += "After finetune, type={}, validation acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f}\n".format(args.type, np.mean(metrics[16]), np.std(metrics[16]), np.mean(metrics[17]), np.std(metrics[17]), np.mean(metrics[18]), np.std(metrics[18]))
 
+    print(perf_inf)
     if args.result_root != None:
         filename = args.type+"_"+args.mode+"_"+args.result_name
         pathname = args.result_root
@@ -325,21 +389,7 @@ def main():
         filepath = os.path.join(pathname, filename)
 
         with open(filepath, "w") as f:
-            for arg in sys.argv:
-                f.write(arg+" ")
-            f.write("\n")
-            f.write("\n")
-            if not is_imagenet:
-                f.write("Before quantization, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f} \n".format(args.type, np.mean(metrics[1]), np.std(metrics[1]), np.mean(metrics[2]), np.std(metrics[2]), np.mean(metrics[3]), np.std(metrics[3])))
-            f.write("Before quantization, type={}, validation acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f} \n".format(args.type, np.mean(metrics[4]), np.std(metrics[4]), np.mean(metrics[5]), np.std(metrics[5]), np.mean(metrics[6]), np.std(metrics[6])))
-            f.write("Compression ratio = {:.4f}+-{:.4f} \n".format(np.mean(metrics[0]), np.std(metrics[0])))
-            if not is_imagenet:
-                f.write("After quantization, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f} \n".format(args.type, np.mean(metrics[7]), np.std(metrics[7]), np.mean(metrics[8]), np.std(metrics[8]), np.mean(metrics[9]), np.std(metrics[9])))
-            f.write("After quantization, type={}, validation acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f} \n".format(args.type, np.mean(metrics[10]), np.std(metrics[10]), np.mean(metrics[11]), np.std(metrics[11]), np.mean(metrics[12]), np.std(metrics[12])))
-            if args.quant_finetune:
-                if not is_imagenet:
-                    f.write("After finetune, type={}, training acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f} \n".format(args.type, np.mean(metrics[13]), np.std(metrics[13]), np.mean(metrics[14]), np.std(metrics[14]), np.mean(metrics[15]), np.std(metrics[15])))
-                f.write("After finetune, type={}, validation acc1={:.4f}+-{:.4f}, acc5={:.4f}+-{:.4f}, loss={:.6f}+-{:.6f} \n".format(args.type, np.mean(metrics[16]), np.std(metrics[16]), np.mean(metrics[17]), np.std(metrics[17]), np.mean(metrics[18]), np.std(metrics[18])))
+            f.write(perf_inf)
             
 
 if __name__ == '__main__':
