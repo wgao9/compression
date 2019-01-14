@@ -287,7 +287,7 @@ def main():
             pathname += "_"+str(args.output_dims)
             pathname += "/model"
         filepath = os.path.join(pathname, filename)
-        assert os.path.isfile(filepath), "Can not find model"
+        assert os.path.isfile(filepath), "Can not find model at "+filepath
 
         with open(filepath, "rb") as f:
             print("Loading model parameters from"+filepath)

@@ -131,14 +131,14 @@ def weighted_k_means_cpu(weight, importance, hessian, n_clusters, init='linear',
                 entropy += (probs[j]+1)*theta[j]/(n_weights+n_clusters)
 
         #update leftmost and rightmost centroids for diameter_reg or diameter_entropy_reg
-        if is_diameter_reg:
+        if is_diameter_reg and n_clusters > 1:
             centroids[0] += 0.5*diameter_reg/coeffs[0,1]
             if centroids[0] > centroids[1]:
                 centroids[0] = centroids[1]-1e-8
             centroids[-1] -= 0.5*diameter_reg/coeffs[-1,1]
             if centroids[-1] < centroids[-2]:
                 centroids[-1] = centroids[-2]+1e-8
-        elif is_diameter_entropy_reg:
+        elif is_diameter_entropy_reg and n_clusters > 1:
             new_cen_0 = (-coeffs[0,0]+2*diameter_entropy_reg*entropy*centroids[-1])/(coeffs[0,1]+2*diameter_entropy_reg*entropy)
             new_cen_minus_1 = (-coeffs[-1,0]+2*diameter_entropy_reg*entropy*centroids[0])/(coeffs[-1,1]+2*diameter_entropy_reg*entropy)
             if new_cen_0 < centroids[1]:
@@ -291,6 +291,13 @@ def reconstruct_weight_from_k_means_result(centroids, labels):
     # for i, c in enumerate(np.squeeze(centroids)):
     #     weight[labels == i] = c
     # return weight
+
+    if centroids.size()[1] == 1:
+        value = centroids.cpu().numpy().item()
+        print(value)
+        weight = value*torch.ones_like(labels)
+        return weight.float().cuda()
+
     weight = torch.zeros_like(labels).float().cuda()
     for i, c in enumerate(centroids.cpu().numpy().squeeze()):
         # print(labels==i)
