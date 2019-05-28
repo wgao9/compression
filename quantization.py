@@ -21,6 +21,7 @@ from utils.hessian_utils import *
 
 import time
 
+#General arguments
 parser = argparse.ArgumentParser(description='PyTorch SVHN Example')
 parser.add_argument('--type', default='cifar10', help='|'.join(selector.known_models))
 parser.add_argument('--batch_size', type=int, default=100, help='input batch size for training')
@@ -44,8 +45,6 @@ parser.add_argument('--temperature', default=1.0, type=float, help='temperature 
 parser.add_argument('--ha', default=0.0, type=float, help='multiplier of hessian')
 parser.add_argument('--mu', default=0.0, type=float, help='stabilizer of hessian')
 parser.add_argument('--entropy_reg', default=0.0, type=float, help='entropy regularizer')
-#parser.add_argument('--diameter_reg', default=0.0, type=float, help='diameter regularizer')
-#parser.add_argument('--diameter_entropy_reg', default=0.0, type=float, help='diameter times entropyregularizer')
 parser.add_argument('--centroids_init', default='quantile', type=str, help='initialization method of centroids: linear/quantile')
 parser.add_argument('--max_iter', default=30, type=int, help='max iteration for quantization')
 parser.add_argument('--quant_finetune', default=False, type=bool, help='finetune after quantization or not')
@@ -72,8 +71,6 @@ torch.manual_seed(args.seed)
 torch.cuda.manual_seed(args.seed)
 
 valid_layer_types = [nn.modules.conv.Conv2d, nn.modules.linear.Linear]
-#valid_layer_types = [nn.modules.linear.Linear]
-#valid_layer_types = [nn.modules.conv.Conv2d]
 
 def quantize(model, weight_importance, weight_hessian, valid_ind, n_clusters, is_imagenet):
     assert len(n_clusters) == len(valid_ind)
@@ -234,8 +231,10 @@ def main():
     val_ds = ds_fetcher(args.batch_size, data_root=args.data_root, train=False, input_size=args.input_size)
     
     # eval raw model
-    #eval_and_print(model_raw, train_ds, val_ds, is_imagenet, prefix_str="Raw")
-   
+    if not is_imagenet:
+        acc1_train, acc5_train, loss_train  = eval_and_print(model_raw, train_ds, is_imagenet, is_train=True, prefix_str="Raw")
+    acc1_val, acc5_val, loss_val = eval_and_print(model_raw, val_ds, is_imagenet, is_train=False, prefix_str="Raw")
+
     # get quantize ratios
     if args.bits is not None:
         clusters = [int(math.pow(2,r)) for r in eval(args.bits)]  # the actual ratio
@@ -257,7 +256,7 @@ def main():
         weight_importance = get_importance(importance_type='gradient', t=args.temperature)
     elif args.mode == 'KL':
         weight_importance = get_importance(importance_type='KL', t=args.temperature)
-    if args.type in ['mnist', 'cifar10']:
+    if args.type in ['mnist', 'cifar10'] and args.mode != 'KL' and args.ha > 0.0:
         #get weight hessian
         weight_hessian = get_importance(importance_type='hessian', t=args.temperature)
         weight_hessian_id = get_importance(importance_type='normal')

@@ -21,6 +21,7 @@ from utils.hessian_utils import *
 
 import time
 
+#General arguments
 parser = argparse.ArgumentParser(description='PyTorch SVHN Example')
 parser.add_argument('--type', default='cifar10', help='|'.join(selector.known_models))
 parser.add_argument('--batch_size', type=int, default=100, help='input batch size for training')
@@ -68,8 +69,6 @@ torch.manual_seed(args.seed)
 torch.cuda.manual_seed(args.seed)
 
 valid_layer_types = [nn.modules.conv.Conv2d, nn.modules.linear.Linear]
-#valid_layer_types = [nn.modules.conv.Conv2d]
-#valid_layer_types = [nn.modules.linear.Linear]
 
 def prune(model, weight_importance, weight_hessian, valid_ind, ratios, is_imagenet):
     assert len(ratios) == len(valid_ind), (len(ratios), len(valid_ind))
@@ -97,8 +96,6 @@ def prune(model, weight_importance, weight_hessian, valid_ind, ratios, is_imagen
 def get_importance(importance_type, t=1.0):
     #load file
     filename = args.type+"_"+importance_type
-    #if args.loss != 'cross_entropy' and importance_type in ['gradient', 'hessian']:
-    #    filename += "_"+args.loss
     if t > 1.0:
         filename += "_t="+str(int(t))
     filename += ".pth"
@@ -237,7 +234,9 @@ def main():
     val_ds = ds_fetcher(args.batch_size, data_root=args.data_root, train=False, input_size=args.input_size)
     
     # eval raw model
-    #eval_and_print(model_raw, train_ds, val_ds, is_imagenet, prefix_str="Raw")
+    if not is_imagenet:
+        acc1_train, acc5_train, loss_train  = eval_and_print(model_raw, train_ds, is_imagenet, is_train=True, prefix_str="Raw")
+    acc1_val, acc5_val, loss_val = eval_and_print(model_raw, val_ds, is_imagenet, is_train=False, prefix_str="Raw")
     
     #Pruning stage by stage
     for stage in range(args.stage):
@@ -263,7 +262,7 @@ def main():
         elif args.mode == 'KL':
             weight_importance = get_importance(importance_type='KL', t=args.temperature)
         #get weight hessian
-        if args.type in ['mnist', 'cifar10'] and args.mode != 'KL':
+        if args.type in ['mnist', 'cifar10'] and args.mode != 'KL' and args.ha > 0:
             weight_hessian = get_importance(importance_type='hessian', t=args.temperature)
             weight_hessian_id = get_importance(importance_type='normal')
             for ix in weight_hessian:
